@@ -1,0 +1,4 @@
+"""Semantic audio autoencoder research package."""
+
+__version__ = "0.1.0"
+

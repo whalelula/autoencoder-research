@@ -1,0 +1,53 @@
+seed: 42
+
+data:
+  root: data
+  manifest_dir: data/manifests
+  sample_rate: 24000
+  duration_seconds: 5.0
+  channels: 1
+  train_random_crop: true
+  peak_normalize: false
+  num_workers: 4
+  pin_memory: true
+
+model:
+  mert_name: m-a-p/MERT-v1-95M
+  mert_layer: -1
+  trust_remote_code: true
+  output_activation: tanh
+
+loss:
+  mrstft_weight: 1.0
+  kl_weight: 0.0001
+  fft_sizes: [32, 64, 128, 256, 512, 1024, 2048]
+  hop_ratio: 0.25
+  use_k_weighting: true
+  stereo_representations: true
+  eps: 1.0e-7
+
+training:
+  output_dir: runs/mert95m
+  epochs: 100
+  batch_size: 8
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  grad_accumulation_steps: 1
+  amp: true
+  log_every_steps: 20
+  validate_every_steps: 500
+  checkpoint_every_steps: 2000
+  sample_every_epochs: 5
+  num_listen_samples: 4
+  max_validation_batches: null
+  resume_from: null
+
+evaluation:
+  batch_size: 4
+  output_dir: outputs/evaluation
+  export_audio: true
+  max_batches: null
+  mel_n_fft: 1024
+  mel_hop_length: 256
+  mel_n_mels: 128
