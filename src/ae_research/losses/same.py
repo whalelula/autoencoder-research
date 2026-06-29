@@ -145,13 +145,16 @@ class MultiResolutionSTFTLoss(nn.Module):
             x_magnitude_product: torch.Tensor,
             y_magnitude_product: torch.Tensor,
         ) -> torch.Tensor:
-            ux = x_product / (x_magnitude_product + self.eps)
-            uy = y_product / (y_magnitude_product + self.eps)
             weight = torch.sqrt(
                 (x_magnitude_product * y_magnitude_product).clamp_min(0.0)
             )
             weight = (weight / (weight.mean(dim=reduce_dims, keepdim=True) + self.eps)).detach()
-            cosine_distance = 1.0 - (ux * uy.conj()).real
+            # The relative phasor angle gives the same cosine distance as
+            # unit-normalizing both complex products, while preserving an exact
+            # zero for identical inputs (including zero-energy bins).
+            cosine_distance = 1.0 - torch.cos(
+                torch.angle(x_product * y_product.conj())
+            )
             return (weight * cosine_distance).mean()
 
         x_time_mag = x[..., 1:] * x[..., :-1]

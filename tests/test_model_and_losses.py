@@ -5,8 +5,11 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("torchaudio")
 
-from ae_research.losses.same import MultiResolutionSTFTLoss, dual_axis_kl
-from ae_research.models.decoder import MERTMirrorDecoder, mert_feature_lengths
+from ae_research.losses.same import MultiResolutionSTFTLoss, dual_axis_kl  # noqa: E402
+from ae_research.models.decoder import (  # noqa: E402
+    MERTMirrorDecoder,
+    mert_feature_lengths,
+)
 
 
 def test_mirror_decoder_exact_output_length():
