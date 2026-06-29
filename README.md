@@ -10,16 +10,16 @@ diffusion 更快收敛，并提高最终生成质量。
 ## 设计边界
 
 - MERT-v1-95M 和 MERT-v1-330M 都使用 24 kHz 输入，分别输出 768 和 1024 维、约 75 Hz
-  的特征。本项目可切换两者，encoder 参数始终冻结。
+的特征。本项目可切换两者，encoder 参数始终冻结。
 - decoder 从所选 checkpoint 的 MERT config 自动读取 `hidden_size`、`conv_dim`、
-  `conv_kernel` 和 `conv_stride`，构造 `Linear + 7 x ConvTranspose1d`。因此 95M/330M
-  切换时无需手工同步 decoder 参数。
+`conv_kernel` 和 `conv_stride`，构造 `Linear + 7 x ConvTranspose1d`。因此 95M/330M
+切换时无需手工同步 decoder 参数。
 - SAME 式 KL 施加在可训练 linear projection 的输出，而不是冻结 MERT 的输出；否则该 loss
-  对任何可训练参数都没有梯度。
+对任何可训练参数都没有梯度。
 - 默认以 24 kHz 训练。配置允许其他数据采样率，但模型会在 MERT/decoder 前后重采样；高于
-  24 kHz 不会恢复 MERT 从未观察到的高频信息，因此正式实验建议保持 24 kHz。
+24 kHz 不会恢复 MERT 从未观察到的高频信息，因此正式实验建议保持 24 kHz。
 - MUSHRA 是人工主观测试，不是可由模型自动计算的单一指标。本项目负责生成 reference、
-  hidden reference、3.5/7 kHz anchors、盲化清单并汇总评分。
+hidden reference、3.5/7 kHz anchors、盲化清单并汇总评分。
 
 参考实现与定义：
 
@@ -29,14 +29,32 @@ diffusion 更快收敛，并提高最终生成质量。
 - [Microsoft FADtk](https://github.com/microsoft/fadtk)
 - [MuQ-Eval](https://github.com/dgtql/MuQ-Eval)
 
+
+
 ## 1. 安装
 
 建议 Python 3.10 或 3.11。先按机器 CUDA 版本安装固定配套的 PyTorch/torchaudio，再安装本项目；
 `pyproject.toml` 故意不让 pip 自动选择 CUDA 大包。
 
+PowerShell：
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+# CUDA 12.6；若驱动环境不同，请换成 PyTorch 官方对应 index。
+pip install torch==2.7.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+
+# CPU-only
+# pip install torch==2.7.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+
+pip install -e ".[dev]"
+```
+
+Linux/bash：
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
 
 # CUDA 12.6；若驱动环境不同，请换成 PyTorch 官方对应 index。
 pip install torch==2.7.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
@@ -74,13 +92,22 @@ export HF_HUB_ENABLE_HF_TRANSFER=0
 metadata，按 tag/时长筛选后随机抽样，再通过 Jamendo API 下载所选单曲。大文件先写入 `.part`，
 支持 Range 续传和重试；下载成功后才原子改名。
 
+PowerShell：
+
 ```powershell
 $env:JAMENDO_CLIENT_ID = "your_client_id"
-ae-prepare --output-root data --num-tracks 1000 --seed 42
+ae-prepare --output-root data --num-tracks 1000 --seed 42 --workers 8
 
 # 只抽样包含指定 tag 的曲目；多个 --tag 默认是“任一匹配”
 ae-prepare --output-root data --num-tracks 500 `
   --tag "genre---electronic" --tag "instrument---piano"
+```
+
+Linux/bash：
+
+```bash
+export JAMENDO_CLIENT_ID="your_client_id"
+ae-prepare --output-root data --num-tracks 1000 --seed 42 --workers 8
 ```
 
 若 metadata 的 GitHub 直链在当前网络不可达，可手动下载官方仓库后显式传入文件：
@@ -155,6 +182,8 @@ ae-mushra prepare --reference-dir outputs/evaluation/reference `
 # 让听者按 outputs/mushra/scores_template.csv 填写 0-100 分后
 ae-mushra summarize --scores outputs/mushra/scores.csv
 ```
+
+
 
 ## 5. 测试
 
