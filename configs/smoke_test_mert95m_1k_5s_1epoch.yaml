@@ -1,13 +1,17 @@
 seed: 42
 
 data:
-  root: data/MTG-Jamendo-1000-24k-mono-3s
-  manifest_dir: data/MTG-Jamendo-1000-24k-mono-3s/manifests
+  root: data/MTG-Jamendo-1000-24k-mono-5s
+  manifest_dir: data/MTG-Jamendo-1000-24k-mono-5s/manifests
   sample_rate: 24000
-  duration_seconds: 3.0
+  duration_seconds: 5.0
   channels: 1
-  train_random_crop: false
-  peak_normalize: false
+  preprocessing:
+    source_root: data/MTG-Jamendo-1000
+    source_manifest_dir: data/MTG-Jamendo-1000/manifests
+    workers: 8
+    drop_last: true
+    overwrite: false
   num_workers: 8
   pin_memory: true
 
@@ -32,15 +36,18 @@ loss:
   phase_weight_floor: 1.0e-3
 
 training:
-  output_dir: runs/smoke_test_mert95m_1k_preprocessed_45epoch
-  epochs: 45
+  output_dir: runs/smoke_test_mert95m_1k_5s_1epoch
+  epochs: 1
   batch_size: 16
-  learning_rate: 0.0002
+  lr_scheduler: warmup_cosine
+  warmup_steps: 100
+  peak_lr: 2.0e-4
+  min_lr: 1.0e-5 # Change to 2.0e-6 for a lower final learning rate.
   weight_decay: 0.01
   grad_clip_norm: 1.0
   grad_accumulation_steps: 2
   amp: true
-  log_every_steps: 10
+  log_every_steps: 30
   validate_every_steps: 100
   checkpoint_every_steps: 100
   sample_every_epochs: 1
@@ -50,7 +57,7 @@ training:
 
 evaluation:
   batch_size: 8
-  output_dir: outputs/evaluation_smoke_test_preprocessed
+  output_dir: outputs/evaluation_smoke_test_offline
   export_audio: true
   max_batches: 10
   mel_n_fft: 1024

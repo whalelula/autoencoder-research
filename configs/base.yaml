@@ -1,13 +1,17 @@
 seed: 42
 
 data:
-  root: data
-  manifest_dir: data/manifests
+  root: data/processed
+  manifest_dir: data/processed/manifests
   sample_rate: 24000
   duration_seconds: 5.0
   channels: 1
-  train_random_crop: true
-  peak_normalize: false
+  preprocessing:
+    source_root: data
+    source_manifest_dir: data/manifests
+    workers: 8
+    drop_last: true
+    overwrite: false
   num_workers: 4
   pin_memory: true
 
@@ -35,7 +39,10 @@ training:
   output_dir: runs/mert95m
   epochs: 100
   batch_size: 8
-  learning_rate: 0.0002
+  lr_scheduler: warmup_cosine
+  warmup_steps: 150
+  peak_lr: 2.0e-4
+  min_lr: 1.0e-5 # Change to 2.0e-6 for a lower final learning rate.
   weight_decay: 0.01
   grad_clip_norm: 1.0
   grad_accumulation_steps: 1

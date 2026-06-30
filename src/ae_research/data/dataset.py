@@ -6,7 +6,6 @@ from typing import Any
 
 import soundfile as sf
 import torch
-import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import DataLoader, Dataset
 
@@ -35,16 +34,12 @@ class AudioManifestDataset(Dataset[dict[str, Any]]):
         sample_rate: int,
         duration_seconds: float,
         channels: int,
-        random_crop: bool,
-        peak_normalize: bool = False,
     ) -> None:
         self.records = read_manifest(manifest)
         self.data_root = Path(data_root)
         self.sample_rate = int(sample_rate)
         self.num_samples = round(sample_rate * duration_seconds)
         self.channels = int(channels)
-        self.random_crop = random_crop
-        self.peak_normalize = peak_normalize
 
     def __len__(self) -> int:
         return len(self.records)
@@ -52,27 +47,6 @@ class AudioManifestDataset(Dataset[dict[str, Any]]):
     def _resolve_path(self, value: str) -> Path:
         path = Path(value)
         return path if path.is_absolute() else self.data_root / path
-
-    def _fix_channels(self, waveform: torch.Tensor) -> torch.Tensor:
-        if self.channels == 1:
-            return waveform.mean(dim=0, keepdim=True)
-        if waveform.shape[0] == 1:
-            return waveform.repeat(2, 1)
-        return waveform[:2]
-
-    def _crop_or_pad(self, waveform: torch.Tensor) -> torch.Tensor:
-        length = waveform.shape[-1]
-        if length > self.num_samples:
-            if self.random_crop:
-                start = int(torch.randint(length - self.num_samples + 1, (1,)).item())
-            else:
-                start = (length - self.num_samples) // 2
-            waveform = waveform[..., start : start + self.num_samples]
-        elif length < self.num_samples:
-            padding = self.num_samples - length
-            left = 0 if self.random_crop else padding // 2
-            waveform = F.pad(waveform, (left, padding - left))
-        return waveform
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
@@ -92,15 +66,25 @@ class AudioManifestDataset(Dataset[dict[str, Any]]):
                     f"converting the dataset to FLAC is a safe fallback. torchaudio: "
                     f"{torchaudio_error}; soundfile: {soundfile_error}"
                 ) from soundfile_error
-        waveform = self._fix_channels(waveform)
         if source_rate != self.sample_rate:
-            waveform = torchaudio.functional.resample(waveform, source_rate, self.sample_rate)
-        waveform = self._crop_or_pad(waveform)
-        if self.peak_normalize:
-            peak = waveform.abs().amax().clamp_min(1e-8)
-            waveform = waveform / peak
+            raise ValueError(
+                f"Preprocessed audio has sample rate {source_rate}, expected "
+                f"{self.sample_rate}: {path}"
+            )
+        if waveform.shape[0] != self.channels:
+            raise ValueError(
+                f"Preprocessed audio has {waveform.shape[0]} channels, expected "
+                f"{self.channels}: {path}"
+            )
+        if waveform.shape[-1] != self.num_samples:
+            raise ValueError(
+                f"Preprocessed audio has {waveform.shape[-1]} samples, expected "
+                f"{self.num_samples}: {path}"
+            )
+        if not torch.isfinite(waveform).all():
+            raise ValueError(f"Preprocessed audio contains non-finite samples: {path}")
         return {
-            "audio": waveform.clamp(-1.0, 1.0),
+            "audio": waveform,
             "track_id": str(record["track_id"]),
             "path": str(path),
         }
@@ -121,8 +105,6 @@ def create_dataloader(
         sample_rate=int(data_config["sample_rate"]),
         duration_seconds=float(data_config["duration_seconds"]),
         channels=int(data_config["channels"]),
-        random_crop=is_train and bool(data_config["train_random_crop"]),
-        peak_normalize=bool(data_config.get("peak_normalize", False)),
     )
     return DataLoader(
         dataset,

@@ -3,16 +3,24 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ae_research.config import load_config
 from ae_research.data.preprocess import preprocess_manifest
+from ae_research.data.preprocess import ensure_preprocessed_dataset
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Convert manifest audio to fixed-length 24 kHz mono FLAC chunks."
     )
-    parser.add_argument("--input-root", type=Path, required=True)
-    parser.add_argument("--manifest-dir", type=Path, required=True)
-    parser.add_argument("--output-root", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--config",
+        type=Path,
+        help="Read all offline preprocessing settings from a training YAML config.",
+    )
+    source.add_argument("--input-root", type=Path)
+    parser.add_argument("--manifest-dir", type=Path)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--sample-rate", type=int, default=24000)
     parser.add_argument("--chunk-seconds", type=float, default=3.0)
     parser.add_argument("--channels", type=int, choices=(1, 2), default=1)
@@ -33,7 +41,30 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.config is not None:
+        if args.manifest_dir is not None or args.output_root is not None or args.split:
+            parser.error(
+                "--config cannot be combined with --manifest-dir, --output-root, or --split"
+            )
+        config = load_config(args.config)
+        counts, prepared = ensure_preprocessed_dataset(config["data"])
+        action = (
+            f"prepared {', '.join(prepared)}"
+            if prepared
+            else "reused existing chunks"
+        )
+        summary = ", ".join(f"{split}={count}" for split, count in counts.items())
+        print(f"Offline dataset ready ({action}; {summary}).")
+        return
+
+    if args.manifest_dir is None or args.output_root is None:
+        parser.error(
+            "--manifest-dir and --output-root are required with --input-root"
+        )
+
     splits = args.split or ["train", "val", "test"]
     manifest_output = args.output_root / "manifests"
     counts = {}

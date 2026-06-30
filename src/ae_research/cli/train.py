@@ -10,9 +10,18 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--device", help="Example: cuda, cuda:1, or cpu")
     args = parser.parse_args()
+    config = load_config(args.config)
+
+    from ae_research.data.preprocess import ensure_preprocessed_dataset
+
+    counts, prepared = ensure_preprocessed_dataset(config["data"])
+    action = f"prepared {', '.join(prepared)}" if prepared else "reused existing chunks"
+    summary = ", ".join(f"{split}={count}" for split, count in counts.items())
+    print(f"Offline dataset ready ({action}; {summary}).")
+
     from ae_research.training import Trainer
 
-    Trainer(load_config(args.config), device=args.device).train()
+    Trainer(config, device=args.device).train()
 
 
 if __name__ == "__main__":

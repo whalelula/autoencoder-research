@@ -31,6 +31,17 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("data.duration_seconds must be positive")
     if int(data["channels"]) not in (1, 2):
         raise ValueError("data.channels must be 1 or 2")
+    preprocessing = data.get("preprocessing")
+    if not isinstance(preprocessing, dict):
+        raise ValueError("data.preprocessing must configure offline chunk preparation")
+    for name in ("source_root", "source_manifest_dir"):
+        if not str(preprocessing.get(name, "")).strip():
+            raise ValueError(f"data.preprocessing.{name} must be set")
+    if int(preprocessing.get("workers", 0)) <= 0:
+        raise ValueError("data.preprocessing.workers must be positive")
+    for name in ("drop_last", "overwrite"):
+        if not isinstance(preprocessing.get(name), bool):
+            raise ValueError(f"data.preprocessing.{name} must be true or false")
 
     model = config["model"]
     model_name = str(model["mert_name"])
@@ -54,6 +65,19 @@ def validate_config(config: dict[str, Any]) -> None:
     for name, default in stability_defaults.items():
         if float(loss.get(name, default)) <= 0:
             raise ValueError(f"loss.{name} must be positive")
+
+    training = config["training"]
+    if str(training.get("lr_scheduler")) != "warmup_cosine":
+        raise ValueError("training.lr_scheduler must be warmup_cosine")
+    warmup_steps = int(training.get("warmup_steps", -1))
+    peak_lr = float(training.get("peak_lr", 0.0))
+    min_lr = float(training.get("min_lr", -1.0))
+    if warmup_steps < 0:
+        raise ValueError("training.warmup_steps must be non-negative")
+    if peak_lr <= 0:
+        raise ValueError("training.peak_lr must be positive")
+    if not 0 <= min_lr < peak_lr:
+        raise ValueError("training.min_lr must be non-negative and smaller than peak_lr")
 
 
 def merged_config(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:

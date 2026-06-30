@@ -96,10 +96,10 @@ PowerShell：
 
 ```powershell
 $env:JAMENDO_CLIENT_ID = "your_client_id"
-ae-prepare --output-root data --num-tracks 1000 --seed 42 --workers 8
+ae-prepare --output-root data/MTG-Jamendo-1000 --num-tracks 1000 --seed 42 --workers 8
 
 # 只抽样包含指定 tag 的曲目；多个 --tag 默认是“任一匹配”
-ae-prepare --output-root data --num-tracks 500 `
+ae-prepare --output-root data/MTG-Jamendo-1000 --num-tracks 500 `
   --tag "genre---electronic" --tag "instrument---piano"
 ```
 
@@ -107,7 +107,7 @@ Linux/bash：
 
 ```bash
 export JAMENDO_CLIENT_ID="your_client_id"
-ae-prepare --output-root data --num-tracks 1000 --seed 42 --workers 8
+ae-prepare --output-root data/MTG-Jamendo-1000 --num-tracks 1000 --seed 42 --workers 8
 ```
 
 若 metadata 的 GitHub 直链在当前网络不可达，可手动下载官方仓库后显式传入文件：
@@ -115,43 +115,65 @@ ae-prepare --output-root data --num-tracks 1000 --seed 42 --workers 8
 ```powershell
 git clone --depth 1 https://github.com/MTG/mtg-jamendo-dataset.git
 ae-prepare --metadata .\mtg-jamendo-dataset\data\raw_30s.tsv `
-  --output-root data --num-tracks 1000
+  --output-root data/MTG-Jamendo-1000 --num-tracks 1000
 ```
 
 已有官方 archive 解压后的音频时，不需要 API：
 
 ```powershell
-ae-prepare --output-root data --num-tracks 1000 --audio-root E:\mtg-jamendo\raw_30s\audio
+ae-prepare --output-root data/MTG-Jamendo-1000 --num-tracks 1000 `
+  --audio-root E:\mtg-jamendo\raw_30s\audio
 ```
 
-输出为 `data/manifests/{train,val,test}.jsonl`，严格按 track 数量做可复现的 7:1:2 切分。
+输出为 `data/MTG-Jamendo-1000/manifests/{train,val,test}.jsonl`，严格按 track 数量做可复现的
+7:1:2 切分。
 默认 track-level 切分；可加 `--group-by-artist` 避免 artist 泄漏（比例会取最接近 7:1:2）。
 MTG-Jamendo 仅限非商业研究使用，且每首音频仍受各自 Creative Commons license 约束。
 
-## 3. 预处理音频
+## 3. 离线预处理与训练
 
-直接训练 MP3 会在每个 batch 重复解码整首歌、重采样后再裁剪片段，GPU 容易等待 CPU。建议先把
-manifest 指向的音频转换成固定长度的 24 kHz mono FLAC chunks：
+训练只读取已经切好的固定长度 FLAC，不再在 Dataset 中重采样、转换声道或随机裁剪。
+`configs/smoke_test.yaml` 同时配置原始数据、离线切块和训练参数：
 
-```bash
-ae-preprocess-audio \
-  --input-root data/MTG-Jamendo-1000 \
-  --manifest-dir data/MTG-Jamendo-1000/manifests \
-  --output-root data/MTG-Jamendo-1000-24k-mono-3s \
-  --sample-rate 24000 \
-  --chunk-seconds 3 \
-  --channels 1 \
-  --workers 8
+```yaml
+data:
+  root: data/MTG-Jamendo-1000-24k-mono-3s
+  manifest_dir: data/MTG-Jamendo-1000-24k-mono-3s/manifests
+  sample_rate: 24000
+  duration_seconds: 3.0
+  channels: 1
+  preprocessing:
+    source_root: data/MTG-Jamendo-1000
+    source_manifest_dir: data/MTG-Jamendo-1000/manifests
+    workers: 8
+    drop_last: true
+    overwrite: false
 ```
 
-输出为 `data/MTG-Jamendo-1000-24k-mono-3s/{audio,manifests}`。训练时可使用
-`configs/smoke_test_preprocessed.yaml`，它关闭随机裁剪、提高 DataLoader worker 数、启用
-`pin_memory` 和 AMP，并增大 batch 以更充分利用 GPU。
+运行训练命令时，程序会先检查三个 processed manifest 及其引用的 chunks。缺失或不完整的 split
+会自动从原始 manifest 离线切成连续、不重叠的 24 kHz mono 3 秒 FLAC；全部准备完成后才创建
+Trainer。再次运行会复用完整的 chunks，不会重复转码。`drop_last: true` 会丢弃不足一个 chunk
+的尾部；设为 `false` 时会补零保留。
+
+Dataset 会严格检查每个 chunk 的采样率、声道数和样本数，发现配置与离线数据不一致时立即报错。
+
+也可以把离线预处理单独执行，仍然读取同一份配置：
+
+```powershell
+ae-preprocess-audio --config configs/smoke_test.yaml
+```
+
+该命令只准备数据，不会加载 MERT 或启动训练。处理完成后再执行 `ae-train`；训练入口仍会先检查
+chunks 是否完整，完整时直接复用。若确实需要重建已有 chunks，可暂时把配置中的
+`preprocessing.overwrite` 设为 `true`，执行一次预处理后再改回 `false`。
+
+原有的完整参数模式仍可用于不依赖训练 YAML 的临时数据转换，可通过
+`ae-preprocess-audio --help` 查看。
 
 ## 4. 训练与查看
 
 ```powershell
-ae-train --config configs/base.yaml
+ae-train --config configs/smoke_test.yaml
 tensorboard --logdir runs
 ```
 
@@ -165,6 +187,20 @@ model:
 训练会记录 total、MR-STFT、KL、SI-SDR 以及 MR-STFT 的 SC/LM/IF/GD/complex 分项；按配置定期
 验证、保存可恢复 checkpoint，并每若干轮导出 reference/reconstruction WAV。训练结束自动输出
 `history.csv` 和 `loss_curves.png`。
+
+学习率按 optimizer step 调度。默认先用 150 steps 从较小学习率线性 warmup 到 `2e-4`，随后
+cosine decay 到 `1e-5`：
+
+```yaml
+training:
+  lr_scheduler: warmup_cosine
+  warmup_steps: 150
+  peak_lr: 2.0e-4
+  min_lr: 1.0e-5
+```
+
+如果长训练后期仍需要更小的更新幅度，可将 `min_lr` 改为 `2.0e-6`。scheduler 状态会随
+checkpoint 保存和恢复，当前学习率也会写入 TensorBoard 与 `history.csv`。
 
 ## 5. Test evaluation
 

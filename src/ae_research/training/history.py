@@ -19,6 +19,7 @@ class HistoryWriter:
         "mrstft_gd",
         "mrstft_complex",
         "si_sdr",
+        "learning_rate",
     ]
 
     def __init__(self, path: str | Path) -> None:
@@ -79,4 +80,3 @@ def plot_history(history_path: str | Path, output_path: str | Path) -> None:
     figure.tight_layout()
     figure.savefig(output_path, dpi=160)
     plt.close(figure)
-

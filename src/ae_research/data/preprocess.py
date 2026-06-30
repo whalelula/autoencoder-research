@@ -12,6 +12,8 @@ import torch.nn.functional as F
 import torchaudio
 from tqdm import tqdm
 
+SPLITS = ("train", "val", "test")
+
 
 def _read_audio(path: Path) -> tuple[torch.Tensor, int]:
     try:
@@ -160,3 +162,70 @@ def preprocess_manifest(
     if processed_count == 0:
         raise RuntimeError(f"No chunks were written for {manifest_path}")
     return processed_count
+
+
+def _prepared_manifest_count(manifest_path: Path, data_root: Path) -> int | None:
+    """Return the record count only when the manifest and all chunks are usable."""
+    if not manifest_path.is_file():
+        return None
+    count = 0
+    try:
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if not _resolve_path(data_root, str(record["path"])).is_file():
+                    return None
+                count += 1
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    return count or None
+
+
+def ensure_preprocessed_dataset(data_config: dict[str, Any]) -> tuple[dict[str, int], list[str]]:
+    """Prepare missing fixed-length chunks before training.
+
+    Existing complete manifests are reused. A missing manifest or referenced chunk
+    triggers regeneration of that split from the source manifest.
+    """
+    preprocessing = data_config["preprocessing"]
+    input_root = Path(preprocessing["source_root"])
+    source_manifest_dir = Path(preprocessing["source_manifest_dir"])
+    output_root = Path(data_config["root"])
+    output_manifest_dir = Path(data_config["manifest_dir"])
+    counts: dict[str, int] = {}
+    prepared: list[str] = []
+    overwrite = bool(preprocessing["overwrite"])
+
+    for split in SPLITS:
+        output_manifest = output_manifest_dir / f"{split}.jsonl"
+        ready_count = (
+            None
+            if overwrite
+            else _prepared_manifest_count(output_manifest, output_root)
+        )
+        if ready_count is not None:
+            counts[split] = ready_count
+            continue
+
+        source_manifest = source_manifest_dir / f"{split}.jsonl"
+        if not source_manifest.is_file():
+            raise FileNotFoundError(
+                f"Source manifest not found: {source_manifest}. Run ae-prepare first."
+            )
+        counts[split] = preprocess_manifest(
+            source_manifest,
+            input_root=input_root,
+            output_root=output_root,
+            output_manifest_dir=output_manifest_dir,
+            sample_rate=int(data_config["sample_rate"]),
+            chunk_seconds=float(data_config["duration_seconds"]),
+            channels=int(data_config["channels"]),
+            workers=int(preprocessing["workers"]),
+            drop_last=bool(preprocessing["drop_last"]),
+            overwrite=overwrite,
+        )
+        prepared.append(split)
+
+    return counts, prepared

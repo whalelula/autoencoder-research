@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections import defaultdict
 from collections.abc import Iterable
@@ -32,6 +33,25 @@ def _seed_everything(seed: int) -> None:
 
 def _mean_metrics(sums: dict[str, float], count: int) -> dict[str, float]:
     return {key: value / max(count, 1) for key, value in sums.items()}
+
+
+def _warmup_cosine_multiplier(
+    step: int,
+    *,
+    total_steps: int,
+    warmup_steps: int,
+    min_ratio: float,
+) -> float:
+    """Return the LR multiplier used by the zero-indexed optimizer update."""
+    if warmup_steps > 0 and step < warmup_steps:
+        return (step + 1) / warmup_steps
+    if total_steps <= warmup_steps:
+        return 1.0
+    decay_steps = total_steps - warmup_steps
+    progress = (step - warmup_steps + 1) / decay_steps
+    progress = min(max(progress, 0.0), 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return min_ratio + (1.0 - min_ratio) * cosine
 
 
 def _nonfinite_details(
@@ -92,10 +112,27 @@ class Trainer:
         self.objective = SameObjective(
             config["loss"], sample_rate=int(data_config["sample_rate"])
         ).to(self.device)
+        peak_lr = float(self.train_config["peak_lr"])
         self.optimizer = torch.optim.AdamW(
             self.model.decoder.parameters(),
-            lr=float(self.train_config["learning_rate"]),
+            lr=peak_lr,
             weight_decay=float(self.train_config["weight_decay"]),
+        )
+        accumulation = int(self.train_config["grad_accumulation_steps"])
+        updates_per_epoch = math.ceil(len(self.train_loader) / accumulation)
+        self.total_optimizer_steps = (
+            updates_per_epoch * int(self.train_config["epochs"])
+        )
+        warmup_steps = int(self.train_config["warmup_steps"])
+        min_ratio = float(self.train_config["min_lr"]) / peak_lr
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=lambda step: _warmup_cosine_multiplier(
+                step,
+                total_steps=self.total_optimizer_steps,
+                warmup_steps=warmup_steps,
+                min_ratio=min_ratio,
+            ),
         )
         self.amp_enabled = bool(self.train_config["amp"]) and self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.amp_enabled)
@@ -280,6 +317,7 @@ class Trainer:
         state = {
             "decoder": self.model.decoder.state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
             "scaler": self.scaler.state_dict(),
             "epoch": epoch,
             "global_step": self.global_step,
@@ -321,9 +359,25 @@ class Trainer:
         self.model.decoder.load_state_dict(checkpoint["decoder"])
         if "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
+        if "scheduler" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler"])
         if "scaler" in checkpoint:
             self.scaler.load_state_dict(checkpoint["scaler"])
         self.global_step = int(checkpoint.get("global_step", 0))
+        if "scheduler" not in checkpoint and self.global_step > 0:
+            self.scheduler.last_epoch = self.global_step
+            learning_rates = [
+                base_lr * lr_lambda(self.global_step)
+                for base_lr, lr_lambda in zip(
+                    self.scheduler.base_lrs,
+                    self.scheduler.lr_lambdas,
+                )
+            ]
+            for group, learning_rate in zip(
+                self.optimizer.param_groups, learning_rates
+            ):
+                group["lr"] = learning_rate
+            self.scheduler._last_lr = learning_rates
         self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
         self.best_val = float(checkpoint.get("best_val", float("inf")))
 
@@ -387,6 +441,7 @@ class Trainer:
                         grad_clip,
                         error_if_nonfinite=True,
                     )
+                    used_learning_rate = self.optimizer.param_groups[0]["lr"]
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self._check_parameters(
@@ -396,12 +451,13 @@ class Trainer:
                     )
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
+                    self.scheduler.step()
                     progress.set_postfix(total=f"{float(losses['total'].detach()):.3f}")
 
                     if self.global_step % log_every == 0:
-                        self._write_metrics(
-                            "train", epoch, _mean_metrics(rolling, rolling_count)
-                        )
+                        metrics = _mean_metrics(rolling, rolling_count)
+                        metrics["learning_rate"] = used_learning_rate
+                        self._write_metrics("train", epoch, metrics)
                         rolling.clear()
                         rolling_count = 0
                     if validate_every > 0 and self.global_step % validate_every == 0:
@@ -413,9 +469,9 @@ class Trainer:
                         )
 
                 if rolling_count:
-                    self._write_metrics(
-                        "train", epoch, _mean_metrics(rolling, rolling_count)
-                    )
+                    metrics = _mean_metrics(rolling, rolling_count)
+                    metrics["learning_rate"] = used_learning_rate
+                    self._write_metrics("train", epoch, metrics)
                 self.validate(epoch)
                 self._save_resume_checkpoints(epoch)
                 if epoch % int(self.train_config["sample_every_epochs"]) == 0:
