@@ -39,9 +39,21 @@ def validate_config(config: dict[str, Any]) -> None:
             "model.mert_name must be m-a-p/MERT-v1-95M or m-a-p/MERT-v1-330M"
         )
 
-    fft_sizes = [int(value) for value in config["loss"]["fft_sizes"]]
+    loss = config["loss"]
+    fft_sizes = [int(value) for value in loss["fft_sizes"]]
     if len(fft_sizes) != 7 or fft_sizes != [32, 64, 128, 256, 512, 1024, 2048]:
         raise ValueError("SAME baseline requires exactly the seven configured FFT sizes")
+    stability_defaults = {
+        "eps": 1e-7,
+        "spectral_contrast_eps": 1e-4,
+        "log_magnitude_std_floor": 1e-4,
+        "complex_distance_eps": 1e-5,
+        "phase_eps": 1e-3,
+        "phase_weight_floor": 1e-3,
+    }
+    for name, default in stability_defaults.items():
+        if float(loss.get(name, default)) <= 0:
+            raise ValueError(f"loss.{name} must be positive")
 
 
 def merged_config(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:

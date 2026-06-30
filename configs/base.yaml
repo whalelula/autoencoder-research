@@ -25,6 +25,11 @@ loss:
   use_k_weighting: true
   stereo_representations: true
   eps: 1.0e-7
+  spectral_contrast_eps: 1.0e-4
+  log_magnitude_std_floor: 1.0e-4
+  complex_distance_eps: 1.0e-5
+  phase_eps: 1.0e-3
+  phase_weight_floor: 1.0e-3
 
 training:
   output_dir: runs/mert95m

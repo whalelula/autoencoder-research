@@ -41,6 +41,11 @@ class MultiResolutionSTFTLoss(nn.Module):
         use_k_weighting: bool = True,
         stereo_representations: bool = True,
         eps: float = 1e-7,
+        spectral_contrast_eps: float = 1e-4,
+        log_magnitude_std_floor: float = 1e-4,
+        complex_distance_eps: float = 1e-5,
+        phase_eps: float = 1e-3,
+        phase_weight_floor: float = 1e-3,
     ) -> None:
         super().__init__()
         self.fft_sizes = tuple(int(value) for value in fft_sizes)
@@ -49,6 +54,11 @@ class MultiResolutionSTFTLoss(nn.Module):
         self.use_k_weighting = bool(use_k_weighting)
         self.stereo_representations = bool(stereo_representations)
         self.eps = float(eps)
+        self.spectral_contrast_eps = float(spectral_contrast_eps)
+        self.log_magnitude_std_floor = float(log_magnitude_std_floor)
+        self.complex_distance_eps = float(complex_distance_eps)
+        self.phase_eps = float(phase_eps)
+        self.phase_weight_floor = float(phase_weight_floor)
         for size in self.fft_sizes:
             self.register_buffer(
                 f"window_{size}", torch.hann_window(size), persistent=False
@@ -128,15 +138,26 @@ class MultiResolutionSTFTLoss(nn.Module):
 
         numerator = torch.linalg.vector_norm(x - y, dim=reduce_dims)
         denominator = torch.linalg.vector_norm(x + y, dim=reduce_dims)
-        spectral_contrast = (numerator / (denominator + self.eps)).mean()
+        spectral_contrast = (
+            numerator / denominator.clamp_min(self.spectral_contrast_eps)
+        ).mean()
 
+        x_std = (
+            x.std(dim=reduce_dims, unbiased=False, keepdim=True)
+            .detach()
+            .clamp_min(self.log_magnitude_std_floor)
+        )
+        y_std = (
+            y.std(dim=reduce_dims, unbiased=False, keepdim=True)
+            .detach()
+            .clamp_min(self.log_magnitude_std_floor)
+        )
         sigma = torch.sqrt(
-            x.std(dim=reduce_dims, unbiased=False, keepdim=True).square()
-            + y.std(dim=reduce_dims, unbiased=False, keepdim=True).square()
-        ).detach()
+            x_std.square() + y_std.square()
+        )
         log_magnitude = (
-            torch.log1p(x / (sigma + self.eps))
-            - torch.log1p(y / (sigma + self.eps))
+            torch.log1p(x / sigma)
+            - torch.log1p(y / sigma)
         ).abs().mean()
 
         def phasor_loss(
@@ -145,16 +166,22 @@ class MultiResolutionSTFTLoss(nn.Module):
             x_magnitude_product: torch.Tensor,
             y_magnitude_product: torch.Tensor,
         ) -> torch.Tensor:
-            weight = torch.sqrt(
-                (x_magnitude_product * y_magnitude_product).clamp_min(0.0)
+            # SAME reference:
+            # github.com/Stability-AI/stable-audio-tools/blob/f14bca0a/
+            # stable_audio_tools/training/losses/auraloss.py#L18-L42
+            # Floor each phasor denominator independently instead of
+            # differentiating through angle(), whose derivative is singular.
+            x_denominator = x_magnitude_product.clamp_min(self.phase_eps)
+            y_denominator = y_magnitude_product.clamp_min(self.phase_eps)
+            ux = x_product / x_denominator
+            uy = y_product / y_denominator
+            weight = (
+                torch.sqrt(x_denominator * y_denominator)
+                .clamp_min(self.phase_weight_floor)
+                .detach()
             )
-            weight = (weight / (weight.mean(dim=reduce_dims, keepdim=True) + self.eps)).detach()
-            # The relative phasor angle gives the same cosine distance as
-            # unit-normalizing both complex products, while preserving an exact
-            # zero for identical inputs (including zero-energy bins).
-            cosine_distance = 1.0 - torch.cos(
-                torch.angle(x_product * y_product.conj())
-            )
+            weight = weight / weight.mean().clamp_min(self.eps)
+            cosine_distance = 1.0 - (ux * uy.conj()).real
             return (weight * cosine_distance).mean()
 
         x_time_mag = x[..., 1:] * x[..., :-1]
@@ -178,9 +205,9 @@ class MultiResolutionSTFTLoss(nn.Module):
         complex_delta_squared = (x_complex - y_complex).abs().square()
         complex_scale = complex_delta_squared.std(
             dim=reduce_dims, unbiased=False, keepdim=True
-        ).detach()
+        ).detach().clamp_min(self.complex_distance_eps)
         complex_distance = torch.log1p(
-            complex_delta_squared / (complex_scale + self.eps)
+            complex_delta_squared / complex_scale
         ).mean()
         return {
             "sc": spectral_contrast,
@@ -226,6 +253,19 @@ class SameObjective(nn.Module):
             use_k_weighting=bool(config["use_k_weighting"]),
             stereo_representations=bool(config["stereo_representations"]),
             eps=float(config["eps"]),
+            spectral_contrast_eps=float(
+                config.get("spectral_contrast_eps", 1e-4)
+            ),
+            log_magnitude_std_floor=float(
+                config.get("log_magnitude_std_floor", 1e-4)
+            ),
+            complex_distance_eps=float(
+                config.get("complex_distance_eps", 1e-5)
+            ),
+            phase_eps=float(config.get("phase_eps", 1e-3)),
+            phase_weight_floor=float(
+                config.get("phase_weight_floor", 1e-3)
+            ),
         )
         self.eps = float(config["eps"])
 

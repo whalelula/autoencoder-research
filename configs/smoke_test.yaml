@@ -2,7 +2,7 @@ seed: 42
 
 data:
   root: data
-  manifest_dir: data/manifests
+  manifest_dir: data/MTG-Jamendo-1000/manifests
   sample_rate: 24000
   duration_seconds: 3.0
   channels: 1
@@ -25,9 +25,14 @@ loss:
   use_k_weighting: true
   stereo_representations: true
   eps: 1.0e-7
+  spectral_contrast_eps: 1.0e-4
+  log_magnitude_std_floor: 1.0e-4
+  complex_distance_eps: 1.0e-5
+  phase_eps: 1.0e-3
+  phase_weight_floor: 1.0e-3
 
 training:
-  output_dir: runs/smoke_test_mert95m_1k
+  output_dir: runs/smoke_test_mert95m_1k_fixed
   epochs: 2
   batch_size: 8
   learning_rate: 0.0002

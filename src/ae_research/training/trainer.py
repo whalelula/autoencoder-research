@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,22 @@ def _seed_everything(seed: int) -> None:
 
 def _mean_metrics(sums: dict[str, float], count: int) -> dict[str, float]:
     return {key: value / max(count, 1) for key, value in sums.items()}
+
+
+def _nonfinite_details(
+    named_tensors: Iterable[tuple[str, torch.Tensor | None]],
+) -> list[str]:
+    details = []
+    for name, value in named_tensors:
+        if value is None or torch.isfinite(value).all():
+            continue
+        nan_count = int(torch.isnan(value).sum().item())
+        inf_count = int(torch.isinf(value).sum().item())
+        details.append(
+            f"{name}: shape={tuple(value.shape)}, "
+            f"nan={nan_count}, inf={inf_count}"
+        )
+    return details
 
 
 class Trainer:
@@ -104,6 +121,89 @@ class Trainer:
         )
         return outputs, losses
 
+    def _abort_nonfinite(
+        self,
+        *,
+        kind: str,
+        epoch: int,
+        batch_index: int,
+        track_ids: list[str],
+        details: list[str],
+    ) -> None:
+        message = (
+            f"Non-finite {kind} detected before optimizer step "
+            f"{self.global_step + 1} (epoch={epoch}, batch={batch_index}, "
+            f"tracks={track_ids}).\n" + "\n".join(details)
+        )
+        self.optimizer.zero_grad(set_to_none=True)
+        self.writer.flush()
+        (self.output_dir / "nonfinite_error.txt").write_text(
+            message + "\n", encoding="utf-8"
+        )
+        raise FloatingPointError(message)
+
+    def _check_losses(
+        self,
+        losses: dict[str, torch.Tensor],
+        *,
+        epoch: int,
+        batch_index: int,
+        track_ids: list[str],
+        split: str,
+    ) -> None:
+        details = _nonfinite_details(losses.items())
+        if details:
+            self._abort_nonfinite(
+                kind=f"{split} loss",
+                epoch=epoch,
+                batch_index=batch_index,
+                track_ids=track_ids,
+                details=details,
+            )
+
+    def _check_gradients(
+        self,
+        *,
+        epoch: int,
+        batch_index: int,
+        track_ids: list[str],
+    ) -> None:
+        try:
+            torch.nn.utils.clip_grad_norm_(
+                self.model.decoder.parameters(),
+                max_norm=float("inf"),
+                error_if_nonfinite=True,
+            )
+        except RuntimeError:
+            details = _nonfinite_details(
+                (name, parameter.grad)
+                for name, parameter in self.model.decoder.named_parameters()
+            )
+            self._abort_nonfinite(
+                kind="gradient",
+                epoch=epoch,
+                batch_index=batch_index,
+                track_ids=track_ids,
+                details=details or ["Non-finite total gradient norm"],
+            )
+
+    def _check_parameters(
+        self,
+        *,
+        epoch: int,
+        batch_index: int,
+        track_ids: list[str],
+    ) -> None:
+        details = _nonfinite_details(self.model.decoder.named_parameters())
+        if details:
+            self._abort_nonfinite(
+                kind="decoder parameter",
+                epoch=epoch,
+                batch_index=batch_index,
+                track_ids=track_ids,
+                details=details,
+            )
+
     def _write_metrics(
         self, split: str, epoch: int, metrics: dict[str, float]
     ) -> None:
@@ -128,6 +228,13 @@ class Trainer:
                 break
             audio = batch["audio"].to(self.device, non_blocking=True)
             outputs, losses = self._forward(audio)
+            self._check_losses(
+                losses,
+                epoch=epoch,
+                batch_index=batch_index + 1,
+                track_ids=[str(value) for value in batch["track_id"]],
+                split="validation",
+            )
             values = {
                 **{key: float(value.detach()) for key, value in losses.items()},
                 "si_sdr": float(si_sdr(outputs["reconstruction"], audio)),
@@ -211,8 +318,22 @@ class Trainer:
             for batch_index, batch in enumerate(progress, start=1):
                 audio = batch["audio"].to(self.device, non_blocking=True)
                 outputs, losses = self._forward(audio)
+                track_ids = [str(value) for value in batch["track_id"]]
+                self._check_losses(
+                    losses,
+                    epoch=epoch,
+                    batch_index=batch_index,
+                    track_ids=track_ids,
+                    split="training",
+                )
                 scaled_loss = losses["total"] / accumulation
                 self.scaler.scale(scaled_loss).backward()
+                if not self.amp_enabled:
+                    self._check_gradients(
+                        epoch=epoch,
+                        batch_index=batch_index,
+                        track_ids=track_ids,
+                    )
 
                 for key, value in losses.items():
                     rolling[key] += float(value.detach())
@@ -228,9 +349,23 @@ class Trainer:
                 if not is_update:
                     continue
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.decoder.parameters(), grad_clip)
+                self._check_gradients(
+                    epoch=epoch,
+                    batch_index=batch_index,
+                    track_ids=track_ids,
+                )
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.decoder.parameters(),
+                    grad_clip,
+                    error_if_nonfinite=True,
+                )
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                self._check_parameters(
+                    epoch=epoch,
+                    batch_index=batch_index,
+                    track_ids=track_ids,
+                )
                 self.optimizer.zero_grad(set_to_none=True)
                 self.global_step += 1
                 progress.set_postfix(total=f"{float(losses['total'].detach()):.3f}")
@@ -263,4 +398,3 @@ class Trainer:
             )
         self.writer.close()
         print(json.dumps({"best_val_total": self.best_val}, indent=2))
-
