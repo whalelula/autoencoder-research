@@ -36,8 +36,8 @@ loss:
   phase_weight_floor: 1.0e-3
 
 training:
-  output_dir: runs/smoke_test_mert330m_1k_5s_5epoch
-  epochs: 5
+  output_dir: runs/smoke_test_mert330m_1k_5s_3epoch
+  epochs: 3
   batch_size: 32
   lr_scheduler: warmup_cosine
   warmup_steps: 100
