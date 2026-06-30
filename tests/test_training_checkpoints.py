@@ -42,6 +42,7 @@ def test_save_resume_checkpoints_writes_best_and_last(tmp_path):
     trainer.scaler = torch.amp.GradScaler("cuda", enabled=False)
     trainer.global_step = 3
     trainer.best_val = 1.25
+    trainer.listening_indices = [4, 1]
     trainer.config = {"training": {"output_dir": str(tmp_path)}}
 
     trainer._save_resume_checkpoints(epoch=2)
@@ -57,7 +58,31 @@ def test_save_resume_checkpoints_writes_best_and_last(tmp_path):
     assert checkpoint["epoch"] == 2
     assert checkpoint["global_step"] == 3
     assert checkpoint["best_val"] == 1.25
+    assert checkpoint["listening_indices"] == [4, 1]
     assert "scheduler" in checkpoint
+
+
+def test_listening_batch_uses_fixed_random_validation_indices():
+    trainer = Trainer.__new__(Trainer)
+    trainer.config = {"seed": 7}
+    trainer.train_config = {"num_listen_samples": 3}
+    trainer.val_loader = SimpleNamespace(
+        dataset=[
+            {
+                "audio": torch.full((1, 2), float(index)),
+                "track_id": f"track-{index}",
+                "path": f"{index}.wav",
+            }
+            for index in range(10)
+        ]
+    )
+
+    trainer.listening_indices = trainer._select_listening_indices()
+    batch = trainer._listening_batch()
+
+    assert trainer.listening_indices == [5, 2, 6]
+    assert batch["track_id"] == ["track-5", "track-2", "track-6"]
+    assert batch["audio"][:, 0, 0].tolist() == [5.0, 2.0, 6.0]
 
 
 def test_load_checkpoint_restores_scheduler_state(tmp_path):
@@ -71,6 +96,7 @@ def test_load_checkpoint_restores_scheduler_state(tmp_path):
     source.scaler = torch.amp.GradScaler("cuda", enabled=False)
     source.global_step = 3
     source.best_val = 0.75
+    source.listening_indices = [5, 2, 6]
     source.config = {"training": {}}
     for _ in range(source.global_step):
         source.optimizer.step()
@@ -86,10 +112,12 @@ def test_load_checkpoint_restores_scheduler_state(tmp_path):
         restored.optimizer, lambda step: (step + 1) / 10
     )
     restored.scaler = torch.amp.GradScaler("cuda", enabled=False)
+    restored.listening_indices = []
     restored.load_checkpoint(checkpoint_path)
 
     assert restored.global_step == 3
     assert restored.start_epoch == 3
+    assert restored.listening_indices == [5, 2, 6]
     assert restored.scheduler.last_epoch == source.scheduler.last_epoch
     assert restored.scheduler.get_last_lr() == pytest.approx(
         source.scheduler.get_last_lr()

@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torchaudio
 import yaml
+from torch.utils.data import default_collate
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -125,6 +126,7 @@ class Trainer:
             split="val",
             shuffle=False,
         )
+        self.listening_indices = self._select_listening_indices()
         self.model = SemanticAudioAutoencoder(
             config["model"],
             audio_channels=int(data_config["channels"]),
@@ -164,6 +166,23 @@ class Trainer:
         self.best_val = float("inf")
         if resume:
             self.load_checkpoint(resume)
+
+    def _select_listening_indices(self) -> list[int]:
+        sample_count = min(
+            int(self.train_config["num_listen_samples"]),
+            len(self.val_loader.dataset),
+        )
+        if sample_count <= 0:
+            return []
+        rng = random.Random(int(self.config.get("seed", 42)))
+        return rng.sample(range(len(self.val_loader.dataset)), k=sample_count)
+
+    def _listening_batch(self) -> dict[str, Any]:
+        if not self.listening_indices:
+            raise RuntimeError("No validation samples selected for listening export")
+        return default_collate(
+            [self.val_loader.dataset[index] for index in self.listening_indices]
+        )
 
     def _forward(self, audio: torch.Tensor) -> tuple[dict, dict]:
         with torch.autocast(
@@ -312,17 +331,20 @@ class Trainer:
     @torch.no_grad()
     def save_listening_samples(self, epoch: int, *, step: int | None = None) -> None:
         self.model.eval()
-        batch = next(iter(self.val_loader))
-        audio = batch["audio"].to(self.device)
-        outputs = self.model(audio)
-        limit = min(int(self.train_config["num_listen_samples"]), audio.shape[0])
         if step is None:
             output_dir = self.sample_dir / f"epoch_{epoch:04d}"
         else:
             output_dir = self.sample_dir / f"step_{step:08d}_epoch_{epoch:04d}"
         output_dir.mkdir(parents=True, exist_ok=True)
+        if not self.listening_indices:
+            self.model.train()
+            return
+
+        batch = self._listening_batch()
+        audio = batch["audio"].to(self.device)
+        outputs = self.model(audio)
         sample_rate = int(self.config["data"]["sample_rate"])
-        for index in range(limit):
+        for index in range(audio.shape[0]):
             track_id = batch["track_id"][index]
             torchaudio.save(
                 output_dir / f"{index:02d}_{track_id}_reference.wav",
@@ -356,6 +378,7 @@ class Trainer:
             "epoch": epoch,
             "global_step": self.global_step,
             "best_val": self.best_val,
+            "listening_indices": self.listening_indices,
             "config": self.config,
         }
         path = Path(path)
@@ -414,6 +437,8 @@ class Trainer:
             self.scheduler._last_lr = learning_rates
         self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
         self.best_val = float(checkpoint.get("best_val", float("inf")))
+        if "listening_indices" in checkpoint:
+            self.listening_indices = [int(index) for index in checkpoint["listening_indices"]]
 
     def train(self) -> None:
         accumulation = int(self.train_config["grad_accumulation_steps"])
