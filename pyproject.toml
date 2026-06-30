@@ -26,6 +26,7 @@ dev = ["pytest>=7.4", "ruff>=0.5"]
 
 [project.scripts]
 ae-prepare = "ae_research.cli.prepare_mtg_jamendo:main"
+ae-preprocess-audio = "ae_research.cli.preprocess_audio:main"
 ae-train = "ae_research.cli.train:main"
 ae-evaluate = "ae_research.cli.evaluate:main"
 ae-mushra = "ae_research.cli.mushra:main"

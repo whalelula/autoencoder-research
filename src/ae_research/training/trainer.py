@@ -287,9 +287,34 @@ class Trainer:
             "config": self.config,
         }
         path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".part")
         torch.save(state, temporary)
         temporary.replace(path)
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError(f"Checkpoint save failed or produced an empty file: {path}")
+
+    def _assert_resume_checkpoints(self) -> None:
+        missing = [
+            str(path)
+            for path in (
+                self.checkpoint_dir / "best.pt",
+                self.checkpoint_dir / "last.pt",
+            )
+            if not path.is_file() or path.stat().st_size == 0
+        ]
+        if missing:
+            raise RuntimeError(
+                "Training did not produce the required resume checkpoints: "
+                + ", ".join(missing)
+            )
+
+    def _save_resume_checkpoints(self, epoch: int) -> None:
+        self.save_checkpoint(self.checkpoint_dir / "last.pt", epoch)
+        best_path = self.checkpoint_dir / "best.pt"
+        if not best_path.is_file() or best_path.stat().st_size == 0:
+            self.save_checkpoint(best_path, epoch)
+        self._assert_resume_checkpoints()
 
     def load_checkpoint(self, path: str | Path) -> None:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
@@ -310,91 +335,101 @@ class Trainer:
         grad_clip = float(self.train_config["grad_clip_norm"])
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
+        current_epoch = self.start_epoch - 1
 
-        for epoch in range(self.start_epoch, int(self.train_config["epochs"]) + 1):
-            rolling: defaultdict[str, float] = defaultdict(float)
-            rolling_count = 0
-            progress = tqdm(self.train_loader, desc=f"epoch {epoch}")
-            for batch_index, batch in enumerate(progress, start=1):
-                audio = batch["audio"].to(self.device, non_blocking=True)
-                outputs, losses = self._forward(audio)
-                track_ids = [str(value) for value in batch["track_id"]]
-                self._check_losses(
-                    losses,
-                    epoch=epoch,
-                    batch_index=batch_index,
-                    track_ids=track_ids,
-                    split="training",
-                )
-                scaled_loss = losses["total"] / accumulation
-                self.scaler.scale(scaled_loss).backward()
-                if not self.amp_enabled:
+        try:
+            for epoch in range(self.start_epoch, int(self.train_config["epochs"]) + 1):
+                current_epoch = epoch
+                rolling: defaultdict[str, float] = defaultdict(float)
+                rolling_count = 0
+                progress = tqdm(self.train_loader, desc=f"epoch {epoch}")
+                for batch_index, batch in enumerate(progress, start=1):
+                    audio = batch["audio"].to(self.device, non_blocking=True)
+                    outputs, losses = self._forward(audio)
+                    track_ids = [str(value) for value in batch["track_id"]]
+                    self._check_losses(
+                        losses,
+                        epoch=epoch,
+                        batch_index=batch_index,
+                        track_ids=track_ids,
+                        split="training",
+                    )
+                    scaled_loss = losses["total"] / accumulation
+                    self.scaler.scale(scaled_loss).backward()
+                    if not self.amp_enabled:
+                        self._check_gradients(
+                            epoch=epoch,
+                            batch_index=batch_index,
+                            track_ids=track_ids,
+                        )
+
+                    for key, value in losses.items():
+                        rolling[key] += float(value.detach())
+                    rolling["si_sdr"] += float(
+                        si_sdr(outputs["reconstruction"].detach(), audio)
+                    )
+                    rolling_count += 1
+
+                    is_update = (
+                        batch_index % accumulation == 0
+                        or batch_index == len(self.train_loader)
+                    )
+                    if not is_update:
+                        continue
+                    self.scaler.unscale_(self.optimizer)
                     self._check_gradients(
                         epoch=epoch,
                         batch_index=batch_index,
                         track_ids=track_ids,
                     )
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.decoder.parameters(),
+                        grad_clip,
+                        error_if_nonfinite=True,
+                    )
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self._check_parameters(
+                        epoch=epoch,
+                        batch_index=batch_index,
+                        track_ids=track_ids,
+                    )
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self.global_step += 1
+                    progress.set_postfix(total=f"{float(losses['total'].detach()):.3f}")
 
-                for key, value in losses.items():
-                    rolling[key] += float(value.detach())
-                rolling["si_sdr"] += float(
-                    si_sdr(outputs["reconstruction"].detach(), audio)
-                )
-                rolling_count += 1
+                    if self.global_step % log_every == 0:
+                        self._write_metrics(
+                            "train", epoch, _mean_metrics(rolling, rolling_count)
+                        )
+                        rolling.clear()
+                        rolling_count = 0
+                    if validate_every > 0 and self.global_step % validate_every == 0:
+                        self.validate(epoch)
+                    if checkpoint_every > 0 and self.global_step % checkpoint_every == 0:
+                        self.save_checkpoint(
+                            self.checkpoint_dir / f"step_{self.global_step:08d}.pt",
+                            epoch,
+                        )
 
-                is_update = (
-                    batch_index % accumulation == 0
-                    or batch_index == len(self.train_loader)
-                )
-                if not is_update:
-                    continue
-                self.scaler.unscale_(self.optimizer)
-                self._check_gradients(
-                    epoch=epoch,
-                    batch_index=batch_index,
-                    track_ids=track_ids,
-                )
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.decoder.parameters(),
-                    grad_clip,
-                    error_if_nonfinite=True,
-                )
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self._check_parameters(
-                    epoch=epoch,
-                    batch_index=batch_index,
-                    track_ids=track_ids,
-                )
-                self.optimizer.zero_grad(set_to_none=True)
-                self.global_step += 1
-                progress.set_postfix(total=f"{float(losses['total'].detach()):.3f}")
-
-                if self.global_step % log_every == 0:
+                if rolling_count:
                     self._write_metrics(
                         "train", epoch, _mean_metrics(rolling, rolling_count)
                     )
-                    rolling.clear()
-                    rolling_count = 0
-                if validate_every > 0 and self.global_step % validate_every == 0:
-                    self.validate(epoch)
-                if checkpoint_every > 0 and self.global_step % checkpoint_every == 0:
-                    self.save_checkpoint(
-                        self.checkpoint_dir / f"step_{self.global_step:08d}.pt",
-                        epoch,
-                    )
-
-            if rolling_count:
-                self._write_metrics(
-                    "train", epoch, _mean_metrics(rolling, rolling_count)
+                self.validate(epoch)
+                self._save_resume_checkpoints(epoch)
+                if epoch % int(self.train_config["sample_every_epochs"]) == 0:
+                    self.save_listening_samples(epoch)
+                plot_history(
+                    self.output_dir / "history.csv",
+                    self.output_dir / "loss_curves.png",
                 )
-            self.validate(epoch)
-            self.save_checkpoint(self.checkpoint_dir / "last.pt", epoch)
-            if epoch % int(self.train_config["sample_every_epochs"]) == 0:
-                self.save_listening_samples(epoch)
-            plot_history(
-                self.output_dir / "history.csv",
-                self.output_dir / "loss_curves.png",
-            )
-        self.writer.close()
+            self._assert_resume_checkpoints()
+        except KeyboardInterrupt:
+            if current_epoch >= self.start_epoch and self.global_step > 0:
+                self.optimizer.zero_grad(set_to_none=True)
+                self._save_resume_checkpoints(current_epoch)
+            raise
+        finally:
+            self.writer.close()
         print(json.dumps({"best_val_total": self.best_val}, indent=2))

@@ -1,15 +1,15 @@
 seed: 42
 
 data:
-  root: data/MTG-Jamendo-1000
-  manifest_dir: data/MTG-Jamendo-1000/manifests
+  root: data/MTG-Jamendo-1000-24k-mono-3s
+  manifest_dir: data/MTG-Jamendo-1000-24k-mono-3s/manifests
   sample_rate: 24000
   duration_seconds: 3.0
   channels: 1
-  train_random_crop: true
+  train_random_crop: false
   peak_normalize: false
-  num_workers: 2
-  pin_memory: false
+  num_workers: 8
+  pin_memory: true
 
 model:
   mert_name: m-a-p/MERT-v1-95M
@@ -32,25 +32,25 @@ loss:
   phase_weight_floor: 1.0e-3
 
 training:
-  output_dir: runs/smoke_test_mert95m_1k_fixed_45epoch
+  output_dir: runs/smoke_test_mert95m_1k_preprocessed_45epoch
   epochs: 45
-  batch_size: 8
+  batch_size: 16
   learning_rate: 0.0002
   weight_decay: 0.01
   grad_clip_norm: 1.0
-  grad_accumulation_steps: 4
-  amp: false
+  grad_accumulation_steps: 2
+  amp: true
   log_every_steps: 10
-  validate_every_steps: 50
-  checkpoint_every_steps: 50
+  validate_every_steps: 100
+  checkpoint_every_steps: 100
   sample_every_epochs: 1
   num_listen_samples: 2
   max_validation_batches: 5
   resume_from: null
 
 evaluation:
-  batch_size: 4
-  output_dir: outputs/evaluation_smoke_test
+  batch_size: 8
+  output_dir: outputs/evaluation_smoke_test_preprocessed
   export_audio: true
   max_batches: 10
   mel_n_fft: 1024

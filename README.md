@@ -76,9 +76,9 @@ pip install -e ".[dev]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 AutoDL/Linux：
 
 ```bash
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_HOME=/root/autodl-tmp/huggingface
-export TRANSFORMERS_CACHE=/root/autodl-tmp/huggingface
+export HF_ENDPOINT=https://hf-mirror.com \
+export HF_HOME=/root/autodl-tmp/huggingface \
+export TRANSFORMERS_CACHE=/root/autodl-tmp/huggingface \
 export HF_HUB_ENABLE_HF_TRANSFER=0
 ```
 
@@ -128,7 +128,27 @@ ae-prepare --output-root data --num-tracks 1000 --audio-root E:\mtg-jamendo\raw_
 默认 track-level 切分；可加 `--group-by-artist` 避免 artist 泄漏（比例会取最接近 7:1:2）。
 MTG-Jamendo 仅限非商业研究使用，且每首音频仍受各自 Creative Commons license 约束。
 
-## 3. 训练与查看
+## 3. 预处理音频
+
+直接训练 MP3 会在每个 batch 重复解码整首歌、重采样后再裁剪片段，GPU 容易等待 CPU。建议先把
+manifest 指向的音频转换成固定长度的 24 kHz mono FLAC chunks：
+
+```bash
+ae-preprocess-audio \
+  --input-root data/MTG-Jamendo-1000 \
+  --manifest-dir data/MTG-Jamendo-1000/manifests \
+  --output-root data/MTG-Jamendo-1000-24k-mono-3s \
+  --sample-rate 24000 \
+  --chunk-seconds 3 \
+  --channels 1 \
+  --workers 8
+```
+
+输出为 `data/MTG-Jamendo-1000-24k-mono-3s/{audio,manifests}`。训练时可使用
+`configs/smoke_test_preprocessed.yaml`，它关闭随机裁剪、提高 DataLoader worker 数、启用
+`pin_memory` 和 AMP，并增大 batch 以更充分利用 GPU。
+
+## 4. 训练与查看
 
 ```powershell
 ae-train --config configs/base.yaml
@@ -146,7 +166,7 @@ model:
 验证、保存可恢复 checkpoint，并每若干轮导出 reference/reconstruction WAV。训练结束自动输出
 `history.csv` 和 `loss_curves.png`。
 
-## 4. Test evaluation
+## 5. Test evaluation
 
 ```powershell
 ae-evaluate --config configs/base.yaml --checkpoint runs/mert95m/checkpoints/best.pt
@@ -185,7 +205,7 @@ ae-mushra summarize --scores outputs/mushra/scores.csv
 
 
 
-## 5. 测试
+## 6. 测试
 
 ```powershell
 pytest
