@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import shutil
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
@@ -70,6 +71,23 @@ def _nonfinite_details(
     return details
 
 
+def _reset_fresh_output_dir(output_dir: Path) -> None:
+    """Remove generated run artifacts before starting a non-resumed training run."""
+    for relative in (
+        "history.csv",
+        "loss_curves.png",
+        "nonfinite_error.txt",
+        "tensorboard",
+        "checkpoints",
+        "samples",
+    ):
+        path = output_dir / relative
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+
+
 class Trainer:
     def __init__(self, config: dict[str, Any], device: str | None = None) -> None:
         self.config = config
@@ -79,6 +97,9 @@ class Trainer:
         )
         self.train_config = config["training"]
         self.output_dir = Path(self.train_config["output_dir"])
+        resume = self.train_config.get("resume_from")
+        if not resume:
+            _reset_fresh_output_dir(self.output_dir)
         self.checkpoint_dir = self.output_dir / "checkpoints"
         self.sample_dir = self.output_dir / "samples"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -141,7 +162,6 @@ class Trainer:
         self.global_step = 0
         self.start_epoch = 1
         self.best_val = float("inf")
-        resume = self.train_config.get("resume_from")
         if resume:
             self.load_checkpoint(resume)
 
@@ -290,28 +310,42 @@ class Trainer:
         return metrics
 
     @torch.no_grad()
-    def save_listening_samples(self, epoch: int) -> None:
+    def save_listening_samples(self, epoch: int, *, step: int | None = None) -> None:
         self.model.eval()
         batch = next(iter(self.val_loader))
         audio = batch["audio"].to(self.device)
         outputs = self.model(audio)
         limit = min(int(self.train_config["num_listen_samples"]), audio.shape[0])
-        epoch_dir = self.sample_dir / f"epoch_{epoch:04d}"
-        epoch_dir.mkdir(parents=True, exist_ok=True)
+        if step is None:
+            output_dir = self.sample_dir / f"epoch_{epoch:04d}"
+        else:
+            output_dir = self.sample_dir / f"step_{step:08d}_epoch_{epoch:04d}"
+        output_dir.mkdir(parents=True, exist_ok=True)
         sample_rate = int(self.config["data"]["sample_rate"])
         for index in range(limit):
             track_id = batch["track_id"][index]
             torchaudio.save(
-                epoch_dir / f"{index:02d}_{track_id}_reference.wav",
+                output_dir / f"{index:02d}_{track_id}_reference.wav",
                 audio[index].detach().cpu().clamp(-1, 1),
                 sample_rate,
             )
             torchaudio.save(
-                epoch_dir / f"{index:02d}_{track_id}_reconstruction.wav",
+                output_dir / f"{index:02d}_{track_id}_reconstruction.wav",
                 outputs["reconstruction"][index].detach().cpu().clamp(-1, 1),
                 sample_rate,
             )
         self.model.train()
+
+    def save_step_artifacts(self, epoch: int) -> None:
+        self.save_checkpoint(
+            self.checkpoint_dir / f"step_{self.global_step:08d}.pt",
+            epoch,
+        )
+        self.save_listening_samples(epoch, step=self.global_step)
+        plot_history(
+            self.output_dir / "history.csv",
+            self.output_dir / "loss_curves.png",
+        )
 
     def save_checkpoint(self, path: str | Path, epoch: int) -> None:
         state = {
@@ -463,10 +497,7 @@ class Trainer:
                     if validate_every > 0 and self.global_step % validate_every == 0:
                         self.validate(epoch)
                     if checkpoint_every > 0 and self.global_step % checkpoint_every == 0:
-                        self.save_checkpoint(
-                            self.checkpoint_dir / f"step_{self.global_step:08d}.pt",
-                            epoch,
-                        )
+                        self.save_step_artifacts(epoch)
 
                 if rolling_count:
                     metrics = _mean_metrics(rolling, rolling_count)
@@ -474,8 +505,6 @@ class Trainer:
                     self._write_metrics("train", epoch, metrics)
                 self.validate(epoch)
                 self._save_resume_checkpoints(epoch)
-                if epoch % int(self.train_config["sample_every_epochs"]) == 0:
-                    self.save_listening_samples(epoch)
                 plot_history(
                     self.output_dir / "history.csv",
                     self.output_dir / "loss_curves.png",

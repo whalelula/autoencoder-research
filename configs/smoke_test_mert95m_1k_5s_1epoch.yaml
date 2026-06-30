@@ -37,8 +37,8 @@ loss:
 
 training:
   output_dir: runs/smoke_test_mert95m_1k_5s_1epoch
-  epochs: 1
-  batch_size: 16
+  epochs: 5
+  batch_size: 32
   lr_scheduler: warmup_cosine
   warmup_steps: 100
   peak_lr: 2.0e-4
@@ -46,13 +46,13 @@ training:
   weight_decay: 0.01
   grad_clip_norm: 1.0
   grad_accumulation_steps: 2
-  amp: true
+  amp: false
   log_every_steps: 30
   validate_every_steps: 100
   checkpoint_every_steps: 100
   sample_every_epochs: 1
-  num_listen_samples: 2
-  max_validation_batches: 5
+  num_listen_samples: 3
+  max_validation_batches: null
   resume_from: null
 
 evaluation:
