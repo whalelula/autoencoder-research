@@ -28,6 +28,7 @@ class FrozenMERTEncoder(nn.Module):
         self.model.eval()
         config = self.model.config
         self.hidden_size = int(config.hidden_size)
+        self.num_attention_heads = int(config.num_attention_heads)
         self.sample_rate = int(config.sample_rate)
         self.conv_dims = tuple(int(value) for value in config.conv_dim)
         self.conv_kernels = tuple(int(value) for value in config.conv_kernel)
@@ -56,11 +57,25 @@ class FrozenMERTEncoder(nn.Module):
         variance = waveform.var(dim=-1, unbiased=False, keepdim=True)
         return (waveform - mean) / torch.sqrt(variance + 1e-7)
 
-    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+    def preprocess(self, waveform: torch.Tensor) -> torch.Tensor:
         if waveform.ndim != 3:
             raise ValueError(f"Expected [batch, channels, samples], got {waveform.shape}")
         mono = waveform.mean(dim=1)
-        normalized = self._normalize(mono)
+        return self._normalize(mono)
+
+    @property
+    def feature_extractor(self) -> nn.Module:
+        return self.model.feature_extractor
+
+    @property
+    def feature_projection(self) -> nn.Module:
+        return self.model.feature_projection
+
+    def encode_normalized(self, normalized: torch.Tensor) -> torch.Tensor:
+        if normalized.ndim != 2:
+            raise ValueError(
+                f"Expected normalized [batch, samples], got {normalized.shape}"
+            )
         request_hidden = self.layer != -1
         with torch.no_grad():
             outputs: Any = self.model(
@@ -76,3 +91,6 @@ class FrozenMERTEncoder(nn.Module):
                 f"MERT layer {self.layer} out of range for {len(hidden_states)} hidden states"
             )
         return hidden_states[self.layer]
+
+    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        return self.encode_normalized(self.preprocess(waveform))

@@ -16,6 +16,16 @@ model:
   mert_layer: 9 # 95M选9，330M选18
   trust_remote_code: true
   output_activation: tanh
+  detail_aware:
+    enabled: true
+    depth: 6
+    cross_attention: true
+    mlp_ratio: 4.0
+    qkv_bias: true
+    projection_dropout: 0.0
+    attention_dropout: 0.0
+    drop_path_rate: 0.0
+    layer_scale_init: null
 
 loss:
   mrstft_weight: 1.0

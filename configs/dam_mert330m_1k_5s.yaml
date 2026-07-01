@@ -1,23 +1,23 @@
 seed: 42
 
 data:
-  root: data/MTG-Jamendo-1000-24k-mono-5s
-  manifest_dir: data/MTG-Jamendo-1000-24k-mono-5s/manifests
+  root: data/processed
+  manifest_dir: data/processed/manifests
   sample_rate: 24000
   duration_seconds: 5.0
   channels: 1
   preprocessing:
-    source_root: data/MTG-Jamendo-1000
-    source_manifest_dir: data/MTG-Jamendo-1000/manifests
+    source_root: data/MTG-Jamendo-1000-24k-mono-5s
+    source_manifest_dir: data/MTG-Jamendo-1000-24k-mono-5s/manifests
     workers: 8
     drop_last: true
     overwrite: false
-  num_workers: 8
+  num_workers: 4
   pin_memory: true
 
 model:
-  mert_name: m-a-p/MERT-v1-95M
-  mert_layer: 9 # 95M选9，330M选18
+  mert_name: m-a-p/MERT-v1-330M
+  mert_layer: 18 # 95M选9，330M选18
   trust_remote_code: true
   output_activation: tanh
   detail_aware:
@@ -46,9 +46,9 @@ loss:
   phase_weight_floor: 1.0e-3
 
 training:
-  output_dir: runs/smoke_test_mert95m_1k_5s_1epoch
+  output_dir: runs/dam_mert330m_1k_5s
   epochs: 5
-  batch_size: 32
+  batch_size: 16
   lr_scheduler: warmup_cosine
   warmup_steps: 100
   peak_lr: 2.0e-4
@@ -57,19 +57,19 @@ training:
   grad_clip_norm: 1.0
   grad_accumulation_steps: 2
   amp: false
-  log_every_steps: 30
+  log_every_steps: 20
   validate_every_steps: 100
-  checkpoint_every_steps: 100
-  sample_every_epochs: 1
+  checkpoint_every_steps: 200
+  sample_every_epochs: 5
   num_listen_samples: 3
   max_validation_batches: null
   resume_from: null
 
 evaluation:
   batch_size: 8
-  output_dir: outputs/evaluation_smoke_test_offline
+  output_dir: outputs/evaluation
   export_audio: true
-  max_batches: 10
+  max_batches: null
   mel_n_fft: 1024
   mel_hop_length: 256
   mel_n_mels: 128

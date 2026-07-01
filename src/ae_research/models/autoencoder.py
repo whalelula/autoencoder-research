@@ -5,6 +5,7 @@ import torchaudio
 from torch import nn
 
 from .decoder import MERTMirrorDecoder
+from .detail_aware import AudioDetailAwareModule
 from .mert import FrozenMERTEncoder
 
 
@@ -26,6 +27,29 @@ class SemanticAudioAutoencoder(nn.Module):
             trust_remote_code=bool(model_config["trust_remote_code"]),
         )
         self.native_sample_rate = self.encoder.sample_rate
+        detail_config = model_config.get("detail_aware", {})
+        self.detail_aware: AudioDetailAwareModule | None = None
+        if bool(detail_config.get("enabled", False)):
+            self.detail_aware = AudioDetailAwareModule(
+                feature_extractor=self.encoder.feature_extractor,
+                feature_projection=self.encoder.feature_projection,
+                dim=self.encoder.hidden_size,
+                depth=int(detail_config.get("depth", 6)),
+                num_heads=self.encoder.num_attention_heads,
+                mlp_ratio=float(detail_config.get("mlp_ratio", 4.0)),
+                qkv_bias=bool(detail_config.get("qkv_bias", True)),
+                projection_dropout=float(
+                    detail_config.get("projection_dropout", 0.0)
+                ),
+                attention_dropout=float(
+                    detail_config.get("attention_dropout", 0.0)
+                ),
+                drop_path_rate=float(detail_config.get("drop_path_rate", 0.0)),
+                layer_scale_init=detail_config.get("layer_scale_init"),
+                cross_attention=bool(
+                    detail_config.get("cross_attention", True)
+                ),
+            )
         self.decoder = MERTMirrorDecoder(
             semantic_dim=self.encoder.hidden_size,
             conv_dims=self.encoder.conv_dims,
@@ -65,9 +89,13 @@ class SemanticAudioAutoencoder(nn.Module):
     def forward(self, waveform: torch.Tensor) -> dict[str, torch.Tensor]:
         target_num_samples = waveform.shape[-1]
         native = self._to_native_rate(waveform)
-        semantic_features = self.encoder(native)
+        normalized = self.encoder.preprocess(native)
+        semantic_features = self.encoder.encode_normalized(normalized)
+        modulated_features = semantic_features
+        if self.detail_aware is not None:
+            modulated_features = self.detail_aware(normalized, semantic_features)
         reconstruction_native, latent = self.decoder(
-            semantic_features, native.shape[-1]
+            modulated_features, native.shape[-1]
         )
         reconstruction = self._from_native_rate(
             reconstruction_native, target_num_samples
@@ -76,4 +104,5 @@ class SemanticAudioAutoencoder(nn.Module):
             "reconstruction": reconstruction,
             "latent": latent,
             "semantic_features": semantic_features,
+            "modulated_features": modulated_features,
         }

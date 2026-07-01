@@ -136,8 +136,11 @@ class Trainer:
             config["loss"], sample_rate=int(data_config["sample_rate"])
         ).to(self.device)
         peak_lr = float(self.train_config["peak_lr"])
+        trainable_parameters = [
+            parameter for parameter in self.model.parameters() if parameter.requires_grad
+        ]
         self.optimizer = torch.optim.AdamW(
-            self.model.decoder.parameters(),
+            trainable_parameters,
             lr=peak_lr,
             weight_decay=float(self.train_config["weight_decay"]),
         )
@@ -246,14 +249,19 @@ class Trainer:
     ) -> None:
         try:
             torch.nn.utils.clip_grad_norm_(
-                self.model.decoder.parameters(),
+                (
+                    parameter
+                    for parameter in self.model.parameters()
+                    if parameter.requires_grad
+                ),
                 max_norm=float("inf"),
                 error_if_nonfinite=True,
             )
         except RuntimeError:
             details = _nonfinite_details(
                 (name, parameter.grad)
-                for name, parameter in self.model.decoder.named_parameters()
+                for name, parameter in self.model.named_parameters()
+                if parameter.requires_grad
             )
             self._abort_nonfinite(
                 kind="gradient",
@@ -270,10 +278,14 @@ class Trainer:
         batch_index: int,
         track_ids: list[str],
     ) -> None:
-        details = _nonfinite_details(self.model.decoder.named_parameters())
+        details = _nonfinite_details(
+            (name, parameter)
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+        )
         if details:
             self._abort_nonfinite(
-                kind="decoder parameter",
+                kind="trainable parameter",
                 epoch=epoch,
                 batch_index=batch_index,
                 track_ids=track_ids,
@@ -381,6 +393,9 @@ class Trainer:
             "listening_indices": self.listening_indices,
             "config": self.config,
         }
+        detail_aware = getattr(self.model, "detail_aware", None)
+        if detail_aware is not None:
+            state["detail_aware"] = detail_aware.state_dict()
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".part")
@@ -414,6 +429,14 @@ class Trainer:
     def load_checkpoint(self, path: str | Path) -> None:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         self.model.decoder.load_state_dict(checkpoint["decoder"])
+        detail_aware = getattr(self.model, "detail_aware", None)
+        if detail_aware is not None:
+            if "detail_aware" not in checkpoint:
+                raise KeyError(
+                    "Checkpoint has no Detail-Aware Module state. "
+                    "Resume with a DAM checkpoint or disable model.detail_aware."
+                )
+            detail_aware.load_state_dict(checkpoint["detail_aware"])
         if "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
         if "scheduler" in checkpoint:
@@ -496,7 +519,11 @@ class Trainer:
                         track_ids=track_ids,
                     )
                     torch.nn.utils.clip_grad_norm_(
-                        self.model.decoder.parameters(),
+                        (
+                            parameter
+                            for parameter in self.model.parameters()
+                            if parameter.requires_grad
+                        ),
                         grad_clip,
                         error_if_nonfinite=True,
                     )

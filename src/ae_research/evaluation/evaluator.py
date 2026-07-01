@@ -81,6 +81,13 @@ def evaluate_checkpoint(
     ).to(selected_device)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     model.decoder.load_state_dict(checkpoint["decoder"])
+    if model.detail_aware is not None:
+        if "detail_aware" not in checkpoint:
+            raise KeyError(
+                "Checkpoint has no Detail-Aware Module state. "
+                "Evaluate with a DAM checkpoint or disable model.detail_aware."
+            )
+        model.detail_aware.load_state_dict(checkpoint["detail_aware"])
     model.eval()
 
     mrstft = MultiResolutionSTFTLoss(

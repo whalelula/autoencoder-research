@@ -49,6 +49,22 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "model.mert_name must be m-a-p/MERT-v1-95M or m-a-p/MERT-v1-330M"
         )
+    detail_aware = model.get("detail_aware", {})
+    if not isinstance(detail_aware, dict):
+        raise ValueError("model.detail_aware must be a mapping")
+    if not isinstance(detail_aware.get("enabled", False), bool):
+        raise ValueError("model.detail_aware.enabled must be true or false")
+    if int(detail_aware.get("depth", 6)) <= 0:
+        raise ValueError("model.detail_aware.depth must be positive")
+    if float(detail_aware.get("mlp_ratio", 4.0)) <= 0:
+        raise ValueError("model.detail_aware.mlp_ratio must be positive")
+    for name in ("projection_dropout", "attention_dropout", "drop_path_rate"):
+        value = float(detail_aware.get(name, 0.0))
+        if not 0.0 <= value < 1.0:
+            raise ValueError(f"model.detail_aware.{name} must be in [0, 1)")
+    layer_scale_init = detail_aware.get("layer_scale_init")
+    if layer_scale_init is not None and float(layer_scale_init) < 0.0:
+        raise ValueError("model.detail_aware.layer_scale_init must be non-negative")
 
     loss = config["loss"]
     fft_sizes = [int(value) for value in loss["fft_sizes"]]
