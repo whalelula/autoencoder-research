@@ -41,6 +41,7 @@ PowerShell：
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+
 # CUDA 12.6；若驱动环境不同，请换成 PyTorch 官方对应 index。
 pip install torch==2.7.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
 
