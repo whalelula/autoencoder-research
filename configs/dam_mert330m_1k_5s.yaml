@@ -1,14 +1,14 @@
 seed: 42
 
 data:
-  root: data/processed
-  manifest_dir: data/processed/manifests
+  root: data/MTG-Jamendo-1000-24k-mono-5s
+  manifest_dir: data/MTG-Jamendo-1000-24k-mono-5s/manifests
   sample_rate: 24000
   duration_seconds: 5.0
   channels: 1
   preprocessing:
-    source_root: data/MTG-Jamendo-1000-24k-mono-5s
-    source_manifest_dir: data/MTG-Jamendo-1000-24k-mono-5s/manifests
+    source_root: data/MTG-Jamendo-1000
+    source_manifest_dir: data/MTG-Jamendo-1000/manifests
     workers: 8
     drop_last: true
     overwrite: false
