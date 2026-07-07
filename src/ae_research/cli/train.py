@@ -6,7 +6,7 @@ from ae_research.config import load_config
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train the frozen-MERT autoencoder.")
+    parser = argparse.ArgumentParser(description="Train an audio autoencoder.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--device", help="Example: cuda, cuda:1, or cpu")
     args = parser.parse_args()

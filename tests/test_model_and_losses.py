@@ -10,6 +10,7 @@ from ae_research.models.decoder import (  # noqa: E402
     MERTMirrorDecoder,
     mert_feature_lengths,
 )
+from ae_research.models.same_autoencoder import SameAutoencoder  # noqa: E402
 from ae_research.training.trainer import _nonfinite_details  # noqa: E402
 
 
@@ -50,6 +51,67 @@ def test_mirror_decoder_uses_each_encoder_layer_width():
     ]
     waveform, _ = decoder(torch.randn(2, frames, 16), target_length)
     assert waveform.shape == (2, 2, target_length)
+
+
+def test_same_autoencoder_matches_input_shape():
+    model = SameAutoencoder(
+        {
+            "type": "same",
+            "variant": "same_s",
+            "pretransform": {
+                "type": "patched",
+                "config": {"patch_size": 2, "channels": 1},
+            },
+            "encoder": {
+                "type": "same",
+                "config": {
+                    "in_channels": 2,
+                    "channels": 8,
+                    "c_mults": [1],
+                    "strides": [4],
+                    "latent_dim": 4,
+                    "transformer_depths": [1],
+                    "chunk_size": 4,
+                    "dim_heads": 4,
+                    "differential": False,
+                    "dyt": False,
+                },
+            },
+            "decoder": {
+                "type": "same",
+                "config": {
+                    "out_channels": 2,
+                    "channels": 8,
+                    "c_mults": [1],
+                    "strides": [4],
+                    "latent_dim": 4,
+                    "transformer_depths": [1],
+                    "chunk_size": 4,
+                    "dim_heads": 4,
+                    "differential": False,
+                    "dyt": False,
+                    "conv_mapping": True,
+                    "mask_noise": 0.0,
+                },
+            },
+            "bottleneck": {
+                "type": "softnorm",
+                "config": {"dim": 4},
+            },
+            "latent_dim": 4,
+            "downsampling_ratio": 8,
+            "io_channels": 1,
+            "output_activation": "none",
+        },
+        audio_channels=1,
+        data_sample_rate=24_000,
+    )
+    waveform = torch.randn(2, 1, 30)
+    outputs = model(waveform)
+    assert outputs["reconstruction"].shape == waveform.shape
+    assert outputs["patched"].shape == (2, 2, 15)
+    assert outputs["latent"].shape == (2, 4, 4)
+    assert "softnorm_loss" in outputs
 
 
 def test_dual_axis_kl_has_gradient():

@@ -20,7 +20,7 @@ from tqdm import tqdm
 from ae_research.data.dataset import create_dataloader
 from ae_research.losses import SameObjective
 from ae_research.metrics import si_sdr
-from ae_research.models import SemanticAudioAutoencoder
+from ae_research.models import SameAutoencoder, SemanticAudioAutoencoder
 
 from .history import HistoryWriter, plot_history
 
@@ -127,11 +127,21 @@ class Trainer:
             shuffle=False,
         )
         self.listening_indices = self._select_listening_indices()
-        self.model = SemanticAudioAutoencoder(
-            config["model"],
-            audio_channels=int(data_config["channels"]),
-            data_sample_rate=int(data_config["sample_rate"]),
-        ).to(self.device)
+        self.model_type = str(config["model"].get("type", "semantic_mert_autoencoder"))
+        if self.model_type == "same":
+            self.model = SameAutoencoder(
+                config["model"],
+                audio_channels=int(data_config["channels"]),
+                data_sample_rate=int(data_config["sample_rate"]),
+            ).to(self.device)
+        elif self.model_type == "semantic_mert_autoencoder":
+            self.model = SemanticAudioAutoencoder(
+                config["model"],
+                audio_channels=int(data_config["channels"]),
+                data_sample_rate=int(data_config["sample_rate"]),
+            ).to(self.device)
+        else:
+            raise ValueError(f"Unknown model.type: {self.model_type}")
         self.objective = SameObjective(
             config["loss"], sample_rate=int(data_config["sample_rate"])
         ).to(self.device)
@@ -196,7 +206,10 @@ class Trainer:
             outputs = self.model(audio)
         # STFT and statistics are deliberately evaluated in float32.
         losses = self.objective(
-            outputs["reconstruction"], audio, outputs["latent"]
+            outputs["reconstruction"],
+            audio,
+            outputs["latent"],
+            bottleneck_loss=outputs.get("softnorm_loss"),
         )
         return outputs, losses
 
@@ -383,7 +396,6 @@ class Trainer:
 
     def save_checkpoint(self, path: str | Path, epoch: int) -> None:
         state = {
-            "decoder": self.model.decoder.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "scaler": self.scaler.state_dict(),
@@ -393,6 +405,11 @@ class Trainer:
             "listening_indices": self.listening_indices,
             "config": self.config,
         }
+        model_type = getattr(self, "model_type", "semantic_mert_autoencoder")
+        if model_type == "same":
+            state["model"] = self.model.state_dict()
+        elif hasattr(self.model, "decoder"):
+            state["decoder"] = self.model.decoder.state_dict()
         detail_aware = getattr(self.model, "detail_aware", None)
         if detail_aware is not None:
             state["detail_aware"] = detail_aware.state_dict()
@@ -428,15 +445,18 @@ class Trainer:
 
     def load_checkpoint(self, path: str | Path) -> None:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-        self.model.decoder.load_state_dict(checkpoint["decoder"])
-        detail_aware = getattr(self.model, "detail_aware", None)
-        if detail_aware is not None:
-            if "detail_aware" not in checkpoint:
-                raise KeyError(
-                    "Checkpoint has no Detail-Aware Module state. "
-                    "Resume with a DAM checkpoint or disable model.detail_aware."
-                )
-            detail_aware.load_state_dict(checkpoint["detail_aware"])
+        if "model" in checkpoint:
+            self.model.load_state_dict(checkpoint["model"])
+        else:
+            self.model.decoder.load_state_dict(checkpoint["decoder"])
+            detail_aware = getattr(self.model, "detail_aware", None)
+            if detail_aware is not None:
+                if "detail_aware" not in checkpoint:
+                    raise KeyError(
+                        "Checkpoint has no Detail-Aware Module state. "
+                        "Resume with a DAM checkpoint or disable model.detail_aware."
+                    )
+                detail_aware.load_state_dict(checkpoint["detail_aware"])
         if "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
         if "scheduler" in checkpoint:

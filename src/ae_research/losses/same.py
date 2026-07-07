@@ -274,9 +274,14 @@ class SameObjective(nn.Module):
         reconstruction: torch.Tensor,
         reference: torch.Tensor,
         latent: torch.Tensor,
+        bottleneck_loss: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         mrstft, components = self.mrstft(reconstruction, reference)
-        kl = dual_axis_kl(latent.float(), self.eps)
+        kl = (
+            bottleneck_loss
+            if bottleneck_loss is not None
+            else dual_axis_kl(latent.float(), self.eps)
+        )
         total = self.mrstft_weight * mrstft + self.kl_weight * kl
         return {
             "total": total,

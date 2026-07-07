@@ -9,8 +9,10 @@ description = "Frozen-MERT semantic audio autoencoder research scaffold"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "einops>=0.7",
   "matplotlib>=3.7",
   "numpy>=1.24,<3",
+  "packaging>=23",
   "PyYAML>=6.0",
   "requests>=2.31",
   "setuptools>=68,<81",
@@ -29,6 +31,8 @@ ae-prepare = "ae_research.cli.prepare_mtg_jamendo:main"
 ae-preprocess-audio = "ae_research.cli.preprocess_audio:main"
 ae-train = "ae_research.cli.train:main"
 ae-evaluate = "ae_research.cli.evaluate:main"
+ae-evaluate-sa3-same = "ae_research.cli.evaluate_sa3_same:main"
+ae-sample-manifest = "ae_research.cli.sample_manifest:main"
 ae-mushra = "ae_research.cli.mushra:main"
 
 [tool.setuptools.packages.find]

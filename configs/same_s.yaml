@@ -1,0 +1,117 @@
+seed: 42
+
+data:
+  root: data/processed_same_s
+  manifest_dir: data/processed_same_s/manifests
+  sample_rate: 44100
+  duration_seconds: 0.5572789115646258 # 24576 / 44100
+  channels: 2
+  preprocessing:
+    source_root: data
+    source_manifest_dir: data/manifests
+    workers: 8
+    drop_last: true
+    overwrite: false
+  num_workers: 4
+  pin_memory: true
+
+model:
+  type: same
+  variant: same_s
+  pretransform:
+    type: patched
+    config:
+      patch_size: 256
+      channels: 2
+  encoder:
+    type: same
+    config:
+      in_channels: 512
+      channels: 128
+      c_mults: [6]
+      strides: [16]
+      latent_dim: 256
+      transformer_depths: [6]
+      checkpointing: false
+      differential: true
+      dyt: true
+      dim_heads: 64
+      variable_stride: true
+      chunk_size: 32
+      chunk_midpoint_shift: true
+      mask_noise: 0.0
+  decoder:
+    type: same
+    config:
+      out_channels: 512
+      channels: 128
+      c_mults: [6]
+      strides: [16]
+      latent_dim: 256
+      transformer_depths: [6]
+      sinusoidal_blocks: [0]
+      checkpointing: false
+      differential: true
+      dyt: true
+      dim_heads: 64
+      variable_stride: true
+      chunk_size: 32
+      chunk_midpoint_shift: true
+      conv_mapping: true
+      mask_noise: 0.01
+  bottleneck:
+    type: softnorm
+    config:
+      dim: 256
+      noise_augment_dim: 0
+      noise_regularize: true
+      auto_scale: true
+      freeze: true
+  latent_dim: 256
+  downsampling_ratio: 4096
+  io_channels: 2
+  output_activation: none
+
+loss:
+  mrstft_weight: 1.0
+  kl_weight: 0.00001
+  fft_sizes: [32, 64, 128, 256, 512, 1024, 2048]
+  hop_ratio: 0.25
+  use_k_weighting: true
+  stereo_representations: true
+  eps: 1.0e-7
+  spectral_contrast_eps: 1.0e-4
+  log_magnitude_std_floor: 1.0e-4
+  complex_distance_eps: 1.0e-5
+  phase_eps: 1.0e-3
+  phase_weight_floor: 1.0e-3
+
+training:
+  output_dir: runs/same_s
+  epochs: 100
+  batch_size: 2
+  lr_scheduler: warmup_cosine
+  warmup_steps: 150
+  peak_lr: 1.5e-4
+  min_lr: 1.0e-5
+  weight_decay: 0.001
+  grad_clip_norm: 1.0
+  grad_accumulation_steps: 1
+  amp: true
+  log_every_steps: 20
+  validate_every_steps: 500
+  checkpoint_every_steps: 2000
+  sample_every_epochs: 5
+  num_listen_samples: 4
+  max_validation_batches: null
+  resume_from: null
+
+evaluation:
+  batch_size: 4
+  output_dir: outputs/evaluation
+  export_audio: true
+  max_batches: null
+  mel_n_fft: 1024
+  mel_hop_length: 256
+  mel_n_mels: 128
+
