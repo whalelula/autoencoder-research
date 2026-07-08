@@ -32,6 +32,7 @@ ae-preprocess-audio = "ae_research.cli.preprocess_audio:main"
 ae-train = "ae_research.cli.train:main"
 ae-evaluate = "ae_research.cli.evaluate:main"
 ae-evaluate-sa3-same = "ae_research.cli.evaluate_sa3_same:main"
+ae-evaluate-stable-audio-vae = "ae_research.cli.evaluate_stable_audio_vae:main"
 ae-sample-manifest = "ae_research.cli.sample_manifest:main"
 ae-mushra = "ae_research.cli.mushra:main"
 

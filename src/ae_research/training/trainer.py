@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import shutil
+import uuid
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
@@ -177,6 +179,8 @@ class Trainer:
         self.global_step = 0
         self.start_epoch = 1
         self.best_val = float("inf")
+        self.best_step = 0
+        self.last_validation_improved = False
         if resume:
             self.load_checkpoint(resume)
 
@@ -349,9 +353,26 @@ class Trainer:
         self._write_metrics("val", epoch, metrics)
         if metrics["total"] < self.best_val:
             self.best_val = metrics["total"]
+            self.best_step = self.global_step
+            self.last_validation_improved = True
             self.save_checkpoint(self.checkpoint_dir / "best.pt", epoch)
+        else:
+            self.last_validation_improved = False
         self.model.train()
         return metrics
+
+    def _early_stopping_patience_steps(self) -> int | None:
+        value = self.train_config.get("early_stopping_patience_steps")
+        if value is None:
+            return None
+        patience = int(value)
+        return patience if patience > 0 else None
+
+    def _early_stopping_reached(self) -> bool:
+        patience = self._early_stopping_patience_steps()
+        if patience is None:
+            return False
+        return self.global_step - self.best_step >= patience
 
     @torch.no_grad()
     def save_listening_samples(self, epoch: int, *, step: int | None = None) -> None:
@@ -402,6 +423,7 @@ class Trainer:
             "epoch": epoch,
             "global_step": self.global_step,
             "best_val": self.best_val,
+            "best_step": self.best_step,
             "listening_indices": self.listening_indices,
             "config": self.config,
         }
@@ -415,11 +437,45 @@ class Trainer:
             state["detail_aware"] = detail_aware.state_dict()
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".part")
-        torch.save(state, temporary)
-        temporary.replace(path)
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            torch.save(state, temporary)
+            with temporary.open("r+b") as handle:
+                os.fsync(handle.fileno())
+            self._validate_checkpoint_file(temporary)
+            os.replace(temporary, path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
         if not path.is_file() or path.stat().st_size == 0:
             raise RuntimeError(f"Checkpoint save failed or produced an empty file: {path}")
+
+    def _validate_checkpoint_file(self, path: Path) -> None:
+        try:
+            checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception as error:
+            raise RuntimeError(f"Checkpoint is not readable after save: {path}") from error
+        required_keys = {"epoch", "global_step", "best_val", "config"}
+        missing = required_keys.difference(checkpoint)
+        if missing:
+            raise RuntimeError(
+                f"Checkpoint is missing required keys after save: {sorted(missing)}"
+            )
+        model_type = getattr(self, "model_type", "semantic_mert_autoencoder")
+        if model_type == "same":
+            model_keys = {"model"}
+        else:
+            model_keys = {"decoder"}
+            if getattr(self.model, "detail_aware", None) is not None:
+                model_keys.add("detail_aware")
+        missing_model_keys = model_keys.difference(checkpoint)
+        if missing_model_keys:
+            raise RuntimeError(
+                "Checkpoint is missing model state after save: "
+                f"{sorted(missing_model_keys)}"
+            )
 
     def _assert_resume_checkpoints(self) -> None:
         missing = [
@@ -435,6 +491,8 @@ class Trainer:
                 "Training did not produce the required resume checkpoints: "
                 + ", ".join(missing)
             )
+        for path in (self.checkpoint_dir / "best.pt", self.checkpoint_dir / "last.pt"):
+            self._validate_checkpoint_file(path)
 
     def _save_resume_checkpoints(self, epoch: int) -> None:
         self.save_checkpoint(self.checkpoint_dir / "last.pt", epoch)
@@ -480,6 +538,7 @@ class Trainer:
             self.scheduler._last_lr = learning_rates
         self.start_epoch = int(checkpoint.get("epoch", 0)) + 1
         self.best_val = float(checkpoint.get("best_val", float("inf")))
+        self.best_step = int(checkpoint.get("best_step", self.global_step))
         if "listening_indices" in checkpoint:
             self.listening_indices = [int(index) for index in checkpoint["listening_indices"]]
 
@@ -492,6 +551,7 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         current_epoch = self.start_epoch - 1
+        stop_training = False
 
         try:
             for epoch in range(self.start_epoch, int(self.train_config["epochs"]) + 1):
@@ -568,19 +628,43 @@ class Trainer:
                         rolling_count = 0
                     if validate_every > 0 and self.global_step % validate_every == 0:
                         self.validate(epoch)
+                        if self._early_stopping_reached():
+                            print(
+                                "Early stopping: validation total has not improved "
+                                f"for {self.global_step - self.best_step} steps "
+                                f"(patience={self._early_stopping_patience_steps()})."
+                            )
+                            stop_training = True
+                            break
                     if checkpoint_every > 0 and self.global_step % checkpoint_every == 0:
                         self.save_step_artifacts(epoch)
 
+                if stop_training:
+                    self._save_resume_checkpoints(epoch)
+                    plot_history(
+                        self.output_dir / "history.csv",
+                        self.output_dir / "loss_curves.png",
+                    )
+                    break
                 if rolling_count:
                     metrics = _mean_metrics(rolling, rolling_count)
                     metrics["learning_rate"] = used_learning_rate
                     self._write_metrics("train", epoch, metrics)
                 self.validate(epoch)
+                if self._early_stopping_reached():
+                    print(
+                        "Early stopping: validation total has not improved "
+                        f"for {self.global_step - self.best_step} steps "
+                        f"(patience={self._early_stopping_patience_steps()})."
+                    )
+                    stop_training = True
                 self._save_resume_checkpoints(epoch)
                 plot_history(
                     self.output_dir / "history.csv",
                     self.output_dir / "loss_curves.png",
                 )
+                if stop_training:
+                    break
             self._assert_resume_checkpoints()
         except KeyboardInterrupt:
             if current_epoch >= self.start_epoch and self.global_step > 0:

@@ -192,6 +192,9 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("training.peak_lr must be positive")
     if not 0 <= min_lr < peak_lr:
         raise ValueError("training.min_lr must be non-negative and smaller than peak_lr")
+    early_stopping_patience = training.get("early_stopping_patience_steps")
+    if early_stopping_patience is not None and int(early_stopping_patience) < 0:
+        raise ValueError("training.early_stopping_patience_steps must be non-negative")
 
 
 def merged_config(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:

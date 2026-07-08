@@ -42,6 +42,7 @@ def test_save_resume_checkpoints_writes_best_and_last(tmp_path):
     trainer.scaler = torch.amp.GradScaler("cuda", enabled=False)
     trainer.global_step = 3
     trainer.best_val = 1.25
+    trainer.best_step = 3
     trainer.listening_indices = [4, 1]
     trainer.config = {"training": {"output_dir": str(tmp_path)}}
 
@@ -58,6 +59,7 @@ def test_save_resume_checkpoints_writes_best_and_last(tmp_path):
     assert checkpoint["epoch"] == 2
     assert checkpoint["global_step"] == 3
     assert checkpoint["best_val"] == 1.25
+    assert checkpoint["best_step"] == 3
     assert checkpoint["listening_indices"] == [4, 1]
     assert "scheduler" in checkpoint
 
@@ -96,6 +98,7 @@ def test_load_checkpoint_restores_scheduler_state(tmp_path):
     source.scaler = torch.amp.GradScaler("cuda", enabled=False)
     source.global_step = 3
     source.best_val = 0.75
+    source.best_step = 3
     source.listening_indices = [5, 2, 6]
     source.config = {"training": {}}
     for _ in range(source.global_step):
@@ -116,9 +119,52 @@ def test_load_checkpoint_restores_scheduler_state(tmp_path):
     restored.load_checkpoint(checkpoint_path)
 
     assert restored.global_step == 3
+    assert restored.best_step == 3
     assert restored.start_epoch == 3
     assert restored.listening_indices == [5, 2, 6]
     assert restored.scheduler.last_epoch == source.scheduler.last_epoch
     assert restored.scheduler.get_last_lr() == pytest.approx(
         source.scheduler.get_last_lr()
     )
+
+
+def test_failed_checkpoint_validation_preserves_existing_checkpoint(tmp_path, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    trainer = Trainer.__new__(Trainer)
+    trainer.model = SimpleNamespace(decoder=torch.nn.Linear(2, 1))
+    trainer.optimizer = torch.optim.AdamW(trainer.model.decoder.parameters())
+    trainer.scheduler = torch.optim.lr_scheduler.LambdaLR(
+        trainer.optimizer, lambda step: 1.0
+    )
+    trainer.scaler = torch.amp.GradScaler("cuda", enabled=False)
+    trainer.global_step = 3
+    trainer.best_val = 1.25
+    trainer.best_step = 3
+    trainer.listening_indices = []
+    trainer.config = {"training": {}}
+
+    trainer.save_checkpoint(checkpoint_path, epoch=1)
+
+    def fail_validation(self, path):  # noqa: ANN001
+        raise RuntimeError(f"bad checkpoint: {path}")
+
+    trainer.global_step = 4
+    monkeypatch.setattr(Trainer, "_validate_checkpoint_file", fail_validation)
+    with pytest.raises(RuntimeError, match="bad checkpoint"):
+        trainer.save_checkpoint(checkpoint_path, epoch=1)
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["global_step"] == 3
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_early_stopping_uses_optimizer_steps():
+    trainer = Trainer.__new__(Trainer)
+    trainer.train_config = {"early_stopping_patience_steps": 500}
+    trainer.best_step = 1000
+
+    trainer.global_step = 1499
+    assert not trainer._early_stopping_reached()
+
+    trainer.global_step = 1500
+    assert trainer._early_stopping_reached()
