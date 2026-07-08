@@ -24,6 +24,10 @@ def _load_stable_audio_pretransform(
 ) -> tuple[torch.nn.Module, dict[str, Any]]:
     try:
         from stable_audio_tools import get_pretrained_model
+        from stable_audio_tools.models.pretrained import (
+            create_model_from_config,
+            load_ckpt_state_dict,
+        )
     except ImportError as exc:
         raise RuntimeError(
             "stable-audio-tools is required for Stable Audio VAE evaluation. "
@@ -31,7 +35,25 @@ def _load_stable_audio_pretransform(
             "this evaluator from a separate environment with this project installed editable."
         ) from exc
 
-    model, model_config = get_pretrained_model(pretrained_name)
+    pretrained_path = Path(pretrained_name)
+    if pretrained_path.exists():
+        config_path = pretrained_path / "model_config.json"
+        if not config_path.exists():
+            raise RuntimeError(f"Missing model_config.json in {pretrained_path}")
+        with config_path.open("r", encoding="utf-8") as handle:
+            model_config = json.load(handle)
+        model = create_model_from_config(model_config)
+        for filename in ("model.safetensors", "model.ckpt"):
+            checkpoint_path = pretrained_path / filename
+            if checkpoint_path.exists():
+                break
+        else:
+            raise RuntimeError(
+                f"Missing model.safetensors or model.ckpt in {pretrained_path}"
+            )
+        model.load_state_dict(load_ckpt_state_dict(checkpoint_path))
+    else:
+        model, model_config = get_pretrained_model(pretrained_name)
     model = model.to(device)
     model.eval()
     if half:
@@ -83,8 +105,8 @@ def evaluate_stable_audio_vae(
     *,
     data_root: str | Path,
     manifest_dir: str | Path | None = None,
-    pretrained_name: str = "stabilityai/stable-audio-open-1.0",
-    system_name: str = "stable-audio-vae",
+    pretrained_name: str = "stabilityai/stable-audio-2",
+    system_name: str = "stable-audio-2-vae-latent",
     device: str | None = None,
     output_dir: str | Path | None = None,
     batch_size: int = 1,
@@ -116,7 +138,7 @@ def evaluate_stable_audio_vae(
     if run_rfad and max_audio_samples is not None:
         raise ValueError("--run-rfad cannot be combined with --max-audio-samples")
 
-    output_path = Path(output_dir or "outputs/evaluation/stable_audio_vae")
+    output_path = Path(output_dir or "outputs/evaluation/stable_audio_2_vae_latent")
     reference_dir, reconstruction_dir = _prepare_audio_dirs(
         output_path, system_name, export_audio
     )

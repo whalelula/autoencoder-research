@@ -46,7 +46,7 @@ loss:
   phase_weight_floor: 1.0e-3
 
 training:
-  output_dir: runs/dam_mert330m_1k_5s
+  output_dir: runs/dam_mert330m_1k_5s_v2
   epochs: 5
   batch_size: 16
   lr_scheduler: warmup_cosine
