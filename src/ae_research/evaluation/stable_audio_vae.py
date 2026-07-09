@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Sequence
@@ -23,7 +24,9 @@ def _load_stable_audio_pretransform(
     half: bool = False,
 ) -> tuple[torch.nn.Module, dict[str, Any]]:
     try:
+        from huggingface_hub import hf_hub_download
         from stable_audio_tools import get_pretrained_model
+        from stable_audio_tools.models.factory import create_pretransform_from_config
         from stable_audio_tools.models.pretrained import (
             create_model_from_config,
             load_ckpt_state_dict,
@@ -51,22 +54,71 @@ def _load_stable_audio_pretransform(
             raise RuntimeError(
                 f"Missing model.safetensors or model.ckpt in {pretrained_path}"
             )
-        model.load_state_dict(load_ckpt_state_dict(checkpoint_path))
     else:
-        model, model_config = get_pretrained_model(pretrained_name)
-    model = model.to(device)
-    model.eval()
-    if half:
-        model = model.half()
-
-    pretransform = getattr(model, "pretransform", None)
-    autoencoder = pretransform if pretransform is not None else model
-    if not hasattr(autoencoder, "encode") or not hasattr(autoencoder, "decode"):
-        raise RuntimeError(
-            f"Model {pretrained_name!r} does not expose an encode/decode autoencoder "
-            "or pretransform."
+        config_path = Path(
+            hf_hub_download(pretrained_name, filename="model_config.json", repo_type="model")
         )
+        with config_path.open("r", encoding="utf-8") as handle:
+            model_config = json.load(handle)
+        try:
+            checkpoint_path = Path(
+                hf_hub_download(
+                    pretrained_name, filename="model.safetensors", repo_type="model"
+                )
+            )
+        except Exception:
+            checkpoint_path = Path(
+                hf_hub_download(pretrained_name, filename="model.ckpt", repo_type="model")
+            )
+
+    pretransform_config = model_config.get("model", {}).get("pretransform")
+    if pretransform_config is not None:
+        autoencoder = create_pretransform_from_config(
+            pretransform_config, sample_rate=int(model_config["sample_rate"])
+        )
+        state_dict = load_ckpt_state_dict(checkpoint_path)
+        pretransform_state_dict = {
+            key.removeprefix("pretransform."): value
+            for key, value in state_dict.items()
+            if key.startswith("pretransform.")
+        }
+        if not pretransform_state_dict:
+            raise RuntimeError(
+                f"No pretransform weights found in checkpoint: {checkpoint_path}"
+            )
+        missing, unexpected = autoencoder.load_state_dict(
+            pretransform_state_dict, strict=False
+        )
+        unexpected_without_loss = [
+            key for key in unexpected if not key.startswith("loss.")
+        ]
+        if unexpected_without_loss:
+            raise RuntimeError(
+                "Unexpected pretransform checkpoint keys: "
+                f"{unexpected_without_loss[:10]}"
+            )
+    else:
+        if pretrained_path.exists():
+            model = create_model_from_config(model_config)
+            model.load_state_dict(load_ckpt_state_dict(checkpoint_path))
+        else:
+            model, model_config = get_pretrained_model(pretrained_name)
+        model = model.to(device)
+        model.eval()
+        if half:
+            model = model.half()
+        pretransform = getattr(model, "pretransform", None)
+        autoencoder = pretransform if pretransform is not None else model
+        if not hasattr(autoencoder, "encode") or not hasattr(autoencoder, "decode"):
+            raise RuntimeError(
+                f"Model {pretrained_name!r} does not expose an encode/decode "
+                "autoencoder or pretransform."
+            )
+
+    autoencoder = autoencoder.to(device)
     autoencoder.eval()
+    if half:
+        autoencoder = autoencoder.half()
     return autoencoder, model_config
 
 
@@ -105,8 +157,8 @@ def evaluate_stable_audio_vae(
     *,
     data_root: str | Path,
     manifest_dir: str | Path | None = None,
-    pretrained_name: str = "stabilityai/stable-audio-2",
-    system_name: str = "stable-audio-2-vae-latent",
+    pretrained_name: str = "stabilityai/stable-audio-open-1.0",
+    system_name: str = "stable-audio-open-1.0-vae-latent",
     device: str | None = None,
     output_dir: str | Path | None = None,
     batch_size: int = 1,
@@ -138,13 +190,24 @@ def evaluate_stable_audio_vae(
     if run_rfad and max_audio_samples is not None:
         raise ValueError("--run-rfad cannot be combined with --max-audio-samples")
 
-    output_path = Path(output_dir or "outputs/evaluation/stable_audio_2_vae_latent")
+    output_path = Path(
+        output_dir or "outputs/evaluation/stable_audio_open_1_0_vae_latent"
+    )
     reference_dir, reconstruction_dir = _prepare_audio_dirs(
         output_path, system_name, export_audio
     )
 
     data_root = Path(data_root)
+    has_external_manifest_dir = manifest_dir is not None
     manifest_dir = Path(manifest_dir) if manifest_dir is not None else data_root / "manifests"
+    manifest_path = manifest_dir / "test.jsonl"
+    copied_manifest_path = output_path / "sample_manifest" / "test.jsonl"
+    if (
+        has_external_manifest_dir
+        and manifest_path.resolve() != copied_manifest_path.resolve()
+    ):
+        copied_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(manifest_path, copied_manifest_path)
     data_config = {
         "root": str(data_root),
         "sample_rate": int(sample_rate),
@@ -154,7 +217,7 @@ def evaluate_stable_audio_vae(
         "pin_memory": bool(pin_memory),
     }
     loader = create_dataloader(
-        manifest_dir / "test.jsonl",
+        manifest_path,
         data_config,
         batch_size=int(batch_size),
         split="test",

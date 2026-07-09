@@ -158,6 +158,74 @@ def test_failed_checkpoint_validation_preserves_existing_checkpoint(tmp_path, mo
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_failed_final_checkpoint_validation_restores_existing_checkpoint(
+    tmp_path, monkeypatch
+):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    trainer = Trainer.__new__(Trainer)
+    trainer.model = SimpleNamespace(decoder=torch.nn.Linear(2, 1))
+    trainer.optimizer = torch.optim.AdamW(trainer.model.decoder.parameters())
+    trainer.scheduler = torch.optim.lr_scheduler.LambdaLR(
+        trainer.optimizer, lambda step: 1.0
+    )
+    trainer.scaler = torch.amp.GradScaler("cuda", enabled=False)
+    trainer.global_step = 3
+    trainer.best_val = 1.25
+    trainer.best_step = 3
+    trainer.listening_indices = []
+    trainer.config = {"training": {}}
+
+    trainer.save_checkpoint(checkpoint_path, epoch=1)
+    trainer.global_step = 4
+
+    import ae_research.training.trainer as trainer_module
+
+    original_replace = trainer_module.os.replace
+
+    def corrupting_replace(src, dst):  # noqa: ANN001
+        original_replace(src, dst)
+        if str(src).endswith(".tmp") and str(dst).endswith("checkpoint.pt"):
+            checkpoint_path.write_bytes(b"incomplete checkpoint")
+
+    monkeypatch.setattr(trainer_module.os, "replace", corrupting_replace)
+    with pytest.raises(RuntimeError, match="Checkpoint is not readable after save"):
+        trainer.save_checkpoint(checkpoint_path, epoch=1)
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["global_step"] == 3
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(tmp_path.glob("*.bak"))
+
+
+def test_save_resume_checkpoints_rewrites_unreadable_best(tmp_path):
+    trainer = Trainer.__new__(Trainer)
+    trainer.checkpoint_dir = tmp_path / "checkpoints"
+    trainer.checkpoint_dir.mkdir()
+    trainer.model = SimpleNamespace(decoder=torch.nn.Linear(2, 1))
+    trainer.optimizer = torch.optim.AdamW(trainer.model.decoder.parameters())
+    trainer.scheduler = torch.optim.lr_scheduler.LambdaLR(
+        trainer.optimizer, lambda step: 1.0
+    )
+    trainer.scaler = torch.amp.GradScaler("cuda", enabled=False)
+    trainer.global_step = 7
+    trainer.best_val = 0.5
+    trainer.best_step = 7
+    trainer.listening_indices = []
+    trainer.config = {"training": {}}
+    (trainer.checkpoint_dir / "best.pt").write_bytes(b"incomplete checkpoint")
+
+    trainer._save_resume_checkpoints(epoch=3)
+
+    best = torch.load(
+        trainer.checkpoint_dir / "best.pt", map_location="cpu", weights_only=False
+    )
+    last = torch.load(
+        trainer.checkpoint_dir / "last.pt", map_location="cpu", weights_only=False
+    )
+    assert best["global_step"] == 7
+    assert last["global_step"] == 7
+
+
 def test_early_stopping_uses_optimizer_steps():
     trainer = Trainer.__new__(Trainer)
     trainer.train_config = {"early_stopping_patience_steps": 500}

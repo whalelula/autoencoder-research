@@ -91,6 +91,19 @@ def _reset_fresh_output_dir(output_dir: Path) -> None:
             path.unlink()
 
 
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        directory_fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 class Trainer:
     def __init__(self, config: dict[str, Any], device: str | None = None) -> None:
         self.config = config
@@ -440,15 +453,36 @@ class Trainer:
         temporary = path.with_name(
             f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
         )
+        backup = path.with_name(
+            f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.bak"
+        )
+        backup_created = False
         try:
             torch.save(state, temporary)
             with temporary.open("r+b") as handle:
                 os.fsync(handle.fileno())
             self._validate_checkpoint_file(temporary)
+            if path.exists():
+                try:
+                    os.link(path, backup)
+                    backup_created = True
+                except OSError:
+                    backup_created = False
             os.replace(temporary, path)
+            _fsync_directory(path.parent)
+            try:
+                self._validate_checkpoint_file(path)
+            except BaseException:
+                if backup_created:
+                    os.replace(backup, path)
+                raise
         except BaseException:
             temporary.unlink(missing_ok=True)
+            if backup_created:
+                backup.unlink(missing_ok=True)
             raise
+        if backup_created:
+            backup.unlink(missing_ok=True)
         if not path.is_file() or path.stat().st_size == 0:
             raise RuntimeError(f"Checkpoint save failed or produced an empty file: {path}")
 
@@ -497,9 +531,18 @@ class Trainer:
     def _save_resume_checkpoints(self, epoch: int) -> None:
         self.save_checkpoint(self.checkpoint_dir / "last.pt", epoch)
         best_path = self.checkpoint_dir / "best.pt"
-        if not best_path.is_file() or best_path.stat().st_size == 0:
+        if not self._checkpoint_is_usable(best_path):
             self.save_checkpoint(best_path, epoch)
         self._assert_resume_checkpoints()
+
+    def _checkpoint_is_usable(self, path: Path) -> bool:
+        if not path.is_file() or path.stat().st_size == 0:
+            return False
+        try:
+            self._validate_checkpoint_file(path)
+        except RuntimeError:
+            return False
+        return True
 
     def load_checkpoint(self, path: str | Path) -> None:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)

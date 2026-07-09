@@ -19,13 +19,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--pretrained-name",
-        default="stabilityai/stable-audio-2",
+        default="stabilityai/stable-audio-open-1.0",
         help="Stable Audio Tools pretrained name or HF repo id.",
     )
-    parser.add_argument("--system-name", default="stable-audio-2-vae-latent")
+    parser.add_argument("--system-name", default="stable-audio-open-1.0-vae-latent")
     parser.add_argument("--device")
     parser.add_argument(
-        "--output-dir", default="outputs/evaluation/stable_audio_2_vae_latent"
+        "--output-dir", default="outputs/evaluation/stable_audio_open_1_0_vae_latent"
     )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=4)
