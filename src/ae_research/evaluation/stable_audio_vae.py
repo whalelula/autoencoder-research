@@ -10,6 +10,7 @@ import torchaudio
 from tqdm import tqdm
 
 from ae_research.data.dataset import create_dataloader
+from ae_research.data.sampling import sample_manifest_track_ids
 from ae_research.evaluation.evaluator import _run_rfad
 from ae_research.evaluation.sa3_same import _match_reference_format
 from ae_research.losses import MultiResolutionSTFTLoss
@@ -176,6 +177,7 @@ def evaluate_stable_audio_vae(
     export_audio: bool = True,
     max_batches: int | None = None,
     max_audio_samples: int | None = None,
+    sample_seed: int = 42,
     run_rfad: bool = False,
     fad_model: str = "vggish",
     mel_n_fft: int = 1024,
@@ -206,6 +208,13 @@ def evaluate_stable_audio_vae(
     data_root = Path(data_root)
     manifest_dir = Path(manifest_dir) if manifest_dir is not None else data_root / "manifests"
     manifest_path = manifest_dir / "test.jsonl"
+    export_track_ids = None
+    if max_audio_samples is not None:
+        export_track_ids = sample_manifest_track_ids(
+            manifest_path,
+            sample_count=int(max_audio_samples),
+            seed=int(sample_seed),
+        )
     data_config = {
         "root": str(data_root),
         "sample_rate": int(sample_rate),
@@ -299,10 +308,11 @@ def evaluate_stable_audio_vae(
                 continue
             sums[key] += value * current_batch_size
 
-        if export_audio and (max_audio_samples is None or exported < max_audio_samples):
+        if export_audio:
             for index, track_id in enumerate(batch["track_id"]):
-                if max_audio_samples is not None and exported >= max_audio_samples:
-                    break
+                track_id = str(track_id)
+                if export_track_ids is not None and track_id not in export_track_ids:
+                    continue
                 filename = f"{track_id}.wav"
                 torchaudio.save(
                     reference_dir / filename,
@@ -322,6 +332,8 @@ def evaluate_stable_audio_vae(
 
     summary: dict[str, Any] = {
         "num_samples": samples,
+        "num_exported_audio_samples": exported,
+        "audio_sample_seed": int(sample_seed) if max_audio_samples is not None else None,
         **{key: value / samples for key, value in sorted(sums.items())},
         "rFAD": None,
         "MUSHRA": "pending_human_test",

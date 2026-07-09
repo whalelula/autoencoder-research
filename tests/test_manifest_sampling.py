@@ -4,7 +4,11 @@ import json
 
 import pytest
 
-from ae_research.data.sampling import sample_manifest_records, write_sample_manifest
+from ae_research.data.sampling import (
+    sample_manifest_records,
+    sample_manifest_track_ids,
+    write_sample_manifest,
+)
 
 
 def test_sample_manifest_records_are_deterministic():
@@ -43,3 +47,20 @@ def test_write_sample_manifest(tmp_path):
     lines = output.read_text(encoding="utf-8").splitlines()
     assert output.name == "test.jsonl"
     assert len(lines) == 2
+
+
+def test_sample_manifest_track_ids_are_deterministic(tmp_path):
+    source = tmp_path / "test.jsonl"
+    records = [{"track_id": str(index), "path": f"{index}.flac"} for index in range(8)]
+    source.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    first = sample_manifest_track_ids(source, sample_count=3, seed=7)
+    second = sample_manifest_track_ids(source, sample_count=3, seed=7)
+    different_seed = sample_manifest_track_ids(source, sample_count=3, seed=8)
+
+    assert first == second
+    assert len(first) == 3
+    assert first != different_seed

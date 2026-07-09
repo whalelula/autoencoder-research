@@ -13,6 +13,7 @@ import torchaudio
 from tqdm import tqdm
 
 from ae_research.data.dataset import create_dataloader
+from ae_research.data.sampling import sample_manifest_track_ids
 from ae_research.losses import MultiResolutionSTFTLoss
 from ae_research.metrics import (
     BANDWISE_SPECTRAL_METRIC_NAMES,
@@ -55,6 +56,8 @@ def evaluate_checkpoint(
     device: str | None = None,
     run_rfad: bool = False,
     fad_model: str = "vggish",
+    max_audio_samples: int | None = None,
+    sample_seed: int = 42,
 ) -> dict[str, Any]:
     selected_device = torch.device(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,6 +67,16 @@ def evaluate_checkpoint(
     output_dir = Path(eval_config["output_dir"])
     reference_dir = output_dir / "reference"
     reconstruction_dir = output_dir / "reconstruction"
+    manifest_path = Path(data_config["manifest_dir"]) / "test.jsonl"
+    if run_rfad and max_audio_samples is not None:
+        raise ValueError("--run-rfad cannot be combined with --max-audio-samples")
+    export_track_ids = None
+    if max_audio_samples is not None:
+        export_track_ids = sample_manifest_track_ids(
+            manifest_path,
+            sample_count=int(max_audio_samples),
+            seed=int(sample_seed),
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     if bool(eval_config["export_audio"]):
         reference_dir.mkdir(parents=True, exist_ok=True)
@@ -73,7 +86,7 @@ def evaluate_checkpoint(
                 stale_file.unlink()
 
     loader = create_dataloader(
-        Path(data_config["manifest_dir"]) / "test.jsonl",
+        manifest_path,
         data_config,
         batch_size=int(eval_config["batch_size"]),
         split="test",
@@ -119,6 +132,7 @@ def evaluate_checkpoint(
     sums: defaultdict[str, float] = defaultdict(float)
     batches = 0
     samples = 0
+    exported = 0
     max_batches = eval_config.get("max_batches")
     for batch_index, batch in enumerate(tqdm(loader, desc="test evaluation")):
         if max_batches is not None and batch_index >= int(max_batches):
@@ -146,6 +160,9 @@ def evaluate_checkpoint(
         if bool(eval_config["export_audio"]):
             sample_rate = int(data_config["sample_rate"])
             for index, track_id in enumerate(batch["track_id"]):
+                track_id = str(track_id)
+                if export_track_ids is not None and track_id not in export_track_ids:
+                    continue
                 filename = f"{track_id}.wav"
                 torchaudio.save(
                     reference_dir / filename,
@@ -157,11 +174,14 @@ def evaluate_checkpoint(
                     reconstruction[index].cpu().clamp(-1, 1),
                     sample_rate,
                 )
+                exported += 1
     if batches == 0:
         raise RuntimeError("Test loader produced no batches")
 
     summary: dict[str, Any] = {
         "num_samples": samples,
+        "num_exported_audio_samples": exported,
+        "audio_sample_seed": int(sample_seed) if max_audio_samples is not None else None,
         **{key: value / samples for key, value in sums.items()},
         "rFAD": None,
         "MUSHRA": "pending_human_test",

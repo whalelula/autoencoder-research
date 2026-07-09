@@ -144,7 +144,7 @@ ae-evaluate `
 - `--system-name stable-audio-open-1.0-vae-latent`
 - `--batch-size 1`
 - `--num-workers 0`
-- `--max-audio-samples 32`
+- `--max-audio-samples 32` (random listening export controlled by `--sample-seed`)
 - `--no-export-audio`
 
 ## 5. 复用 sa3_same_l_listen5 的 5 条 sample

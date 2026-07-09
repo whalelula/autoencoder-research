@@ -76,7 +76,7 @@ ae-evaluate --model same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device 
 - `--output-dir outputs/evaluation/sa3_same`
 - `--batch-size 4`
 - `--num-workers 4`
-- `--max-audio-samples 32`
+- `--max-audio-samples 32` (random listening export controlled by `--sample-seed`)
 - `--no-export-audio`
 
 ## 4. 输出内容
@@ -113,7 +113,7 @@ outputs/evaluation/sa3_same/
 如果只想导出少量主观听感 sample，但仍然在完整 test set 上算指标：
 
 ```powershell
-ae-evaluate --model same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --max-audio-samples 32
+ae-evaluate --model same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --max-audio-samples 32 --sample-seed 42
 ```
 
 `--max-audio-samples` 不能和 `--run-rfad` 同时使用，因为 rFAD 应该基于完整导出的 reference/system WAV 计算。

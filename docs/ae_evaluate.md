@@ -58,6 +58,13 @@ The CLI can override `--output-dir`, `--batch-size`, `--max-batches`,
 `--sample-rate`, `--duration-seconds`, `--channels`, `--num-workers`,
 `--no-pin-memory`, and `--no-export-audio`.
 
+`--max-audio-samples` controls only the listening WAV export. Metrics still run
+on the full evaluated set unless `--max-batches` or a sampled manifest is used.
+Exported listening samples are selected randomly from `test.jsonl` with
+`--sample-seed`, so using the same manifest, `--max-audio-samples`, and
+`--sample-seed` across `same`, `sao`, and checkpoint runs exports the same
+track IDs for human listening.
+
 ## SA3 SAME examples
 
 Evaluate both SAME-S and SAME-L:
@@ -134,6 +141,27 @@ Stable Audio Open VAE defaults:
 - `--channels 1`
 
 Use `--half` to run the Stable Audio model in half precision.
+
+For matched listening comparisons, prefer the same random export selection for
+each model:
+
+```powershell
+ae-evaluate `
+  --model same-l `
+  --data-root data/MTG-Jamendo-1000-24k-mono-5s `
+  --max-audio-samples 5 `
+  --sample-seed 42 `
+  --output-dir outputs/evaluation/sa3_same_l_listen5 `
+  --device cuda
+
+ae-evaluate `
+  --model sao `
+  --data-root data/MTG-Jamendo-1000-24k-mono-5s `
+  --max-audio-samples 5 `
+  --sample-seed 42 `
+  --output-dir outputs/evaluation/sao1_listen5 `
+  --device cuda
+```
 
 ## Metrics and audio export
 

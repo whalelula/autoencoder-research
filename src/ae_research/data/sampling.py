@@ -5,7 +5,20 @@ import random
 from pathlib import Path
 from typing import Any
 
-from ae_research.data.dataset import read_manifest
+
+def read_manifest_records(path: str | Path) -> list[dict[str, Any]]:
+    records = []
+    with Path(path).open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON at {path}:{line_number}") from exc
+    if not records:
+        raise ValueError(f"Manifest is empty: {path}")
+    return records
 
 
 def sample_manifest_records(
@@ -29,7 +42,7 @@ def write_sample_manifest(
     seed: int,
     split: str = "test",
 ) -> Path:
-    records = read_manifest(source_manifest)
+    records = read_manifest_records(source_manifest)
     sampled = sample_manifest_records(records, sample_count=sample_count, seed=seed)
     output_manifest_dir = Path(output_manifest_dir)
     output_manifest_dir.mkdir(parents=True, exist_ok=True)
@@ -38,3 +51,11 @@ def write_sample_manifest(
         for record in sampled:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     return output_manifest
+
+
+def sample_manifest_track_ids(
+    source_manifest: str | Path, *, sample_count: int, seed: int
+) -> set[str]:
+    records = read_manifest_records(source_manifest)
+    sampled = sample_manifest_records(records, sample_count=sample_count, seed=seed)
+    return {str(record["track_id"]) for record in sampled}

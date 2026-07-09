@@ -79,7 +79,10 @@ def _build_parser() -> argparse.ArgumentParser:
     runtime.add_argument(
         "--max-audio-samples",
         type=int,
-        help="Limit exported listening WAVs while still computing metrics on all batches.",
+        help=(
+            "Randomly export this many listening WAVs while still computing metrics "
+            "on all evaluated batches. Selection is controlled by --sample-seed."
+        ),
     )
     runtime.add_argument("--run-rfad", action="store_true")
     runtime.add_argument("--fad-model", default="vggish")
@@ -188,6 +191,8 @@ def _evaluate_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
         device=args.device,
         run_rfad=args.run_rfad,
         fad_model=args.fad_model,
+        max_audio_samples=args.max_audio_samples,
+        sample_seed=args.sample_seed,
     )
 
 
@@ -241,6 +246,7 @@ def _evaluate_sao(args: argparse.Namespace) -> dict[str, Any]:
         export_audio=not args.no_export_audio,
         max_batches=args.max_batches,
         max_audio_samples=args.max_audio_samples,
+        sample_seed=args.sample_seed,
         run_rfad=args.run_rfad,
         fad_model=args.fad_model,
         half=args.half,

@@ -10,7 +10,7 @@ import torchaudio
 from tqdm import tqdm
 
 from ae_research.data.dataset import create_dataloader
-from ae_research.data.sampling import write_sample_manifest
+from ae_research.data.sampling import sample_manifest_track_ids, write_sample_manifest
 from ae_research.evaluation.evaluator import _run_rfad
 from ae_research.losses import MultiResolutionSTFTLoss
 from ae_research.metrics import (
@@ -142,6 +142,14 @@ def evaluate_sa3_same(
             split="test",
         )
         manifest_dir = sampled_manifest_dir
+    manifest_path = manifest_dir / "test.jsonl"
+    export_track_ids = None
+    if max_audio_samples is not None:
+        export_track_ids = sample_manifest_track_ids(
+            manifest_path,
+            sample_count=int(max_audio_samples),
+            seed=int(sample_seed),
+        )
     data_config = {
         "root": str(data_root),
         "sample_rate": int(sample_rate),
@@ -151,7 +159,7 @@ def evaluate_sa3_same(
         "pin_memory": bool(pin_memory),
     }
     loader = create_dataloader(
-        manifest_dir / "test.jsonl",
+        manifest_path,
         data_config,
         batch_size=int(batch_size),
         split="test",
@@ -236,10 +244,11 @@ def evaluate_sa3_same(
                     continue
                 sums[name][key] += value * batch_size
 
-        if export_audio and (max_audio_samples is None or exported < max_audio_samples):
+        if export_audio:
             for index, track_id in enumerate(batch["track_id"]):
-                if max_audio_samples is not None and exported >= max_audio_samples:
-                    break
+                track_id = str(track_id)
+                if export_track_ids is not None and track_id not in export_track_ids:
+                    continue
                 filename = f"{track_id}.wav"
                 torchaudio.save(
                     reference_dir / filename,
@@ -266,6 +275,7 @@ def evaluate_sa3_same(
         "manifest_dir": str(manifest_dir),
         "sample_count": sample_count,
         "sample_seed": int(sample_seed) if sample_count is not None else None,
+        "audio_sample_seed": int(sample_seed) if max_audio_samples is not None else None,
         "models": {},
     }
     for name in model_names:
