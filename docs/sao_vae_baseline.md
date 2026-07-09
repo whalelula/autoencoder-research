@@ -2,7 +2,7 @@
 
 本文档说明如何在已经预处理好的 `MTG-Jamendo-1000-24k-mono-5s` test 集上，评测 Stable Audio Open 1.0（即 Stable Audio 1）的 VAE/pretransform latent autoencoder baseline，并导出和 `sa3_same_l_listen5` 完全一致的主观听感 sample。
 
-当前项目命令名为 `ae-evaluate-stable-audio-vae`。默认使用：
+当前项目统一评测命令为 `ae-evaluate --model sao`。默认使用：
 
 - `--pretrained-name stabilityai/stable-audio-open-1.0`
 - `--system-name stable-audio-open-1.0-vae-latent`
@@ -96,7 +96,8 @@ data/MTG-Jamendo-1000-24k-mono-5s/
 
 ```powershell
 $env:PYTHONPATH='src'
-conda run -n tokenizer-eval python -m ae_research.cli.evaluate_stable_audio_vae `
+conda run -n tokenizer-eval python -m ae_research.cli.evaluate `
+  --model sao `
   --data-root data/MTG-Jamendo-1000-24k-mono-5s `
   --device cuda `
   --batch-size 1 `
@@ -106,7 +107,8 @@ conda run -n tokenizer-eval python -m ae_research.cli.evaluate_stable_audio_vae 
 如果已经 `pip install -e .` 并刷新了 entry point，也可以直接运行：
 
 ```powershell
-ae-evaluate-stable-audio-vae `
+ae-evaluate `
+  --model sao `
   --data-root data/MTG-Jamendo-1000-24k-mono-5s `
   --device cuda `
   --batch-size 1 `
@@ -116,7 +118,8 @@ ae-evaluate-stable-audio-vae `
 显存紧张时可以启用半精度：
 
 ```powershell
-ae-evaluate-stable-audio-vae `
+ae-evaluate `
+  --model sao `
   --data-root data/MTG-Jamendo-1000-24k-mono-5s `
   --device cuda `
   --batch-size 1 `
@@ -127,7 +130,8 @@ ae-evaluate-stable-audio-vae `
 调试时只跑少量 batch：
 
 ```powershell
-ae-evaluate-stable-audio-vae `
+ae-evaluate `
+  --model sao `
   --data-root data/MTG-Jamendo-1000-24k-mono-5s `
   --device cuda `
   --max-batches 2
@@ -149,7 +153,8 @@ ae-evaluate-stable-audio-vae `
 
 ```powershell
 $env:PYTHONPATH='src'
-conda run -n tokenizer-eval python -m ae_research.cli.evaluate_stable_audio_vae `
+conda run -n tokenizer-eval python -m ae_research.cli.evaluate `
+  --model sao `
   --data-root data/MTG-Jamendo-1000-24k-mono-5s `
   --manifest-dir outputs/evaluation/sa3_same_l_listen5/sample_manifest `
   --output-dir outputs/evaluation/stable_audio_open_1_0_vae_latent_listen5 `
@@ -162,7 +167,8 @@ conda run -n tokenizer-eval python -m ae_research.cli.evaluate_stable_audio_vae 
 
 ```powershell
 $env:PYTHONPATH='src'
-conda run -n tokenizer-eval python -m ae_research.cli.evaluate_stable_audio_vae `
+conda run -n tokenizer-eval python -m ae_research.cli.evaluate `
+  --model sao `
   --data-root data/MTG-Jamendo-1000-24k-mono-5s `
   --manifest-dir outputs/evaluation/sa3_same_l_listen5/sample_manifest `
   --output-dir outputs/evaluation/stable_audio_open_1_0_vae_latent_listen5 `
@@ -212,6 +218,10 @@ outputs/evaluation/stable_audio_open_1_0_vae_latent_listen5/
 - `MR-STFT/if`
 - `MR-STFT/gd`
 - `MR-STFT/complex`
+- `STFT/low`, `MEL/low` (`0-500 Hz`)
+- `STFT/mid`, `MEL/mid` (`500 Hz-4 kHz`)
+- `STFT/high`, `MEL/high` (`4-12 kHz`)
+- `STFT/air`, `MEL/air` (`12-20 kHz`; 24 kHz evaluation 中该频段为 `null`)
 - `rFAD`，仅在传入 `--run-rfad` 时计算
 - `latent_shapes`，记录 autoencoder latent 的形状
 
@@ -228,7 +238,8 @@ pip install -e ".[eval]"
 然后运行：
 
 ```powershell
-ae-evaluate-stable-audio-vae `
+ae-evaluate `
+  --model sao `
   --data-root data/MTG-Jamendo-1000-24k-mono-5s `
   --device cuda `
   --run-rfad `

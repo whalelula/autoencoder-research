@@ -13,7 +13,12 @@ from ae_research.data.dataset import create_dataloader
 from ae_research.data.sampling import write_sample_manifest
 from ae_research.evaluation.evaluator import _run_rfad
 from ae_research.losses import MultiResolutionSTFTLoss
-from ae_research.metrics import LogMelL1, si_sdr
+from ae_research.metrics import (
+    BANDWISE_SPECTRAL_METRIC_NAMES,
+    BandwiseSpectralErrors,
+    LogMelL1,
+    si_sdr,
+)
 
 SA3_SAME_MODELS = ("same-s", "same-l")
 
@@ -170,6 +175,12 @@ def evaluate_sa3_same(
         hop_length=int(mel_hop_length),
         n_mels=int(mel_n_mels),
     ).to(selected_device)
+    band_errors = BandwiseSpectralErrors(
+        sample_rate,
+        n_fft=int(mel_n_fft),
+        hop_length=int(mel_hop_length),
+        n_mels=int(mel_n_mels),
+    ).to(selected_device)
 
     autoencoders = {
         name: _load_sa3_autoencoder(name, selected_device) for name in model_names
@@ -218,7 +229,11 @@ def evaluate_sa3_same(
                 "MR-STFT": float(spectral),
                 **{f"MR-STFT/{key}": float(value) for key, value in components.items()},
             }
+            for key, value in band_errors(reconstruction, audio).items():
+                values[key] = None if value is None else float(value)
             for key, value in values.items():
+                if value is None:
+                    continue
                 sums[name][key] += value * batch_size
 
         if export_audio and (max_audio_samples is None or exported < max_audio_samples):
@@ -257,6 +272,8 @@ def evaluate_sa3_same(
         model_summary = {
             key: value / samples for key, value in sorted(sums[name].items())
         }
+        for key in BANDWISE_SPECTRAL_METRIC_NAMES:
+            model_summary.setdefault(key, None)
         model_summary["rFAD"] = None
         if run_rfad:
             rfad_output_dir = output_path / f"rfad_{name}"

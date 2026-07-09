@@ -13,7 +13,12 @@ from ae_research.data.dataset import create_dataloader
 from ae_research.evaluation.evaluator import _run_rfad
 from ae_research.evaluation.sa3_same import _match_reference_format
 from ae_research.losses import MultiResolutionSTFTLoss
-from ae_research.metrics import LogMelL1, si_sdr
+from ae_research.metrics import (
+    BANDWISE_SPECTRAL_METRIC_NAMES,
+    BandwiseSpectralErrors,
+    LogMelL1,
+    si_sdr,
+)
 
 
 def _load_stable_audio_pretransform(
@@ -241,6 +246,12 @@ def evaluate_stable_audio_vae(
         hop_length=int(mel_hop_length),
         n_mels=int(mel_n_mels),
     ).to(selected_device)
+    band_errors = BandwiseSpectralErrors(
+        sample_rate,
+        n_fft=int(mel_n_fft),
+        hop_length=int(mel_hop_length),
+        n_mels=int(mel_n_mels),
+    ).to(selected_device)
 
     sums: defaultdict[str, float] = defaultdict(float)
     latent_shapes: set[tuple[int, ...]] = set()
@@ -281,7 +292,11 @@ def evaluate_stable_audio_vae(
             "MR-STFT": float(spectral),
             **{f"MR-STFT/{key}": float(value) for key, value in components.items()},
         }
+        for key, value in band_errors(reconstruction, audio).items():
+            values[key] = None if value is None else float(value)
         for key, value in values.items():
+            if value is None:
+                continue
             sums[key] += value * current_batch_size
 
         if export_audio and (max_audio_samples is None or exported < max_audio_samples):
@@ -311,6 +326,8 @@ def evaluate_stable_audio_vae(
         "rFAD": None,
         "MUSHRA": "pending_human_test",
     }
+    for key in BANDWISE_SPECTRAL_METRIC_NAMES:
+        summary.setdefault(key, None)
     if run_rfad:
         rfad_output_dir = output_path / f"rfad_{system_name}"
         rfad_output_dir.mkdir(parents=True, exist_ok=True)

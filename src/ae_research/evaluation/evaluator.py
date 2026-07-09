@@ -14,7 +14,12 @@ from tqdm import tqdm
 
 from ae_research.data.dataset import create_dataloader
 from ae_research.losses import MultiResolutionSTFTLoss
-from ae_research.metrics import LogMelL1, si_sdr
+from ae_research.metrics import (
+    BANDWISE_SPECTRAL_METRIC_NAMES,
+    BandwiseSpectralErrors,
+    LogMelL1,
+    si_sdr,
+)
 from ae_research.models import SemanticAudioAutoencoder
 
 
@@ -104,6 +109,12 @@ def evaluate_checkpoint(
         hop_length=int(eval_config["mel_hop_length"]),
         n_mels=int(eval_config["mel_n_mels"]),
     ).to(selected_device)
+    band_errors = BandwiseSpectralErrors(
+        int(data_config["sample_rate"]),
+        n_fft=int(eval_config["mel_n_fft"]),
+        hop_length=int(eval_config["mel_hop_length"]),
+        n_mels=int(eval_config["mel_n_mels"]),
+    ).to(selected_device)
 
     sums: defaultdict[str, float] = defaultdict(float)
     batches = 0
@@ -123,7 +134,11 @@ def evaluate_checkpoint(
             "MR-STFT": float(spectral),
             **{f"MR-STFT/{key}": float(value) for key, value in components.items()},
         }
+        for key, value in band_errors(reconstruction, audio).items():
+            values[key] = None if value is None else float(value)
         for key, value in values.items():
+            if value is None:
+                continue
             sums[key] += value * batch_size
         batches += 1
         samples += batch_size
@@ -151,6 +166,8 @@ def evaluate_checkpoint(
         "rFAD": None,
         "MUSHRA": "pending_human_test",
     }
+    for key in BANDWISE_SPECTRAL_METRIC_NAMES:
+        summary.setdefault(key, None)
     if run_rfad:
         if not bool(eval_config["export_audio"]):
             raise ValueError("evaluation.export_audio must be true to compute rFAD")

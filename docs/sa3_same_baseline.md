@@ -49,26 +49,26 @@ data/MTG-Jamendo-1000-24k-mono-5s/
 默认同时评测 `same-s` 和 `same-l`：
 
 ```powershell
-ae-evaluate-sa3-same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda
+ae-evaluate --model same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda
 ```
 
 只评测其中一个模型：
 
 ```powershell
-ae-evaluate-sa3-same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --model same-s
-ae-evaluate-sa3-same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --model same-l
+ae-evaluate --model same-s --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda
+ae-evaluate --model same-l --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda
 ```
 
 显存不足时可启用 SA3 的 chunked encode/decode：
 
 ```powershell
-ae-evaluate-sa3-same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --chunked --chunk-size 128 --overlap 32
+ae-evaluate --model same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --chunked --chunk-size 128 --overlap 32
 ```
 
 调试时只跑少量 batch：
 
 ```powershell
-ae-evaluate-sa3-same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --max-batches 2
+ae-evaluate --model same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --max-batches 2
 ```
 
 常用可选参数：
@@ -102,6 +102,10 @@ outputs/evaluation/sa3_same/
 - `MR-STFT/if`
 - `MR-STFT/gd`
 - `MR-STFT/complex`
+- `STFT/low`, `MEL/low` (`0-500 Hz`)
+- `STFT/mid`, `MEL/mid` (`500 Hz-4 kHz`)
+- `STFT/high`, `MEL/high` (`4-12 kHz`)
+- `STFT/air`, `MEL/air` (`12-20 kHz`; 24 kHz evaluation 中该频段为 `null`)
 - `rFAD`，仅在传入 `--run-rfad` 时计算
 
 导出的 WAV 会转换回 `24 kHz mono 5s`，方便和本项目 autoencoder 的 reconstruction 直接对比。
@@ -109,7 +113,7 @@ outputs/evaluation/sa3_same/
 如果只想导出少量主观听感 sample，但仍然在完整 test set 上算指标：
 
 ```powershell
-ae-evaluate-sa3-same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --max-audio-samples 32
+ae-evaluate --model same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --max-audio-samples 32
 ```
 
 `--max-audio-samples` 不能和 `--run-rfad` 同时使用，因为 rFAD 应该基于完整导出的 reference/system WAV 计算。
@@ -125,7 +129,7 @@ pip install -e ".[eval]"
 然后运行：
 
 ```powershell
-ae-evaluate-sa3-same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --run-rfad --fad-model vggish
+ae-evaluate --model same --data-root data/MTG-Jamendo-1000-24k-mono-5s --device cuda --run-rfad --fad-model vggish
 ```
 
 也可以在评测结束后手动运行：
