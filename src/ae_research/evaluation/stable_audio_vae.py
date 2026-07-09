@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Sequence
@@ -45,7 +44,6 @@ def _load_stable_audio_pretransform(
             raise RuntimeError(f"Missing model_config.json in {pretrained_path}")
         with config_path.open("r", encoding="utf-8") as handle:
             model_config = json.load(handle)
-        model = create_model_from_config(model_config)
         for filename in ("model.safetensors", "model.ckpt"):
             checkpoint_path = pretrained_path / filename
             if checkpoint_path.exists():
@@ -76,19 +74,22 @@ def _load_stable_audio_pretransform(
         autoencoder = create_pretransform_from_config(
             pretransform_config, sample_rate=int(model_config["sample_rate"])
         )
-        state_dict = load_ckpt_state_dict(checkpoint_path)
+        state_dict = load_ckpt_state_dict(str(checkpoint_path))
+        pretransform_model_prefix = "pretransform.model."
         pretransform_state_dict = {
-            key.removeprefix("pretransform."): value
+            key.removeprefix(pretransform_model_prefix): value
             for key, value in state_dict.items()
-            if key.startswith("pretransform.")
+            if key.startswith(pretransform_model_prefix)
         }
         if not pretransform_state_dict:
             raise RuntimeError(
                 f"No pretransform weights found in checkpoint: {checkpoint_path}"
             )
-        missing, unexpected = autoencoder.load_state_dict(
+        missing, unexpected = autoencoder.model.load_state_dict(
             pretransform_state_dict, strict=False
         )
+        if missing:
+            raise RuntimeError(f"Missing pretransform checkpoint keys: {missing[:10]}")
         unexpected_without_loss = [
             key for key in unexpected if not key.startswith("loss.")
         ]
@@ -100,7 +101,7 @@ def _load_stable_audio_pretransform(
     else:
         if pretrained_path.exists():
             model = create_model_from_config(model_config)
-            model.load_state_dict(load_ckpt_state_dict(checkpoint_path))
+            model.load_state_dict(load_ckpt_state_dict(str(checkpoint_path)))
         else:
             model, model_config = get_pretrained_model(pretrained_name)
         model = model.to(device)
@@ -142,7 +143,7 @@ def _prepare_audio_dirs(
     output_dir: Path, system_name: str, export_audio: bool
 ) -> tuple[Path, Path]:
     reference_dir = output_dir / "reference"
-    reconstruction_dir = output_dir / system_name
+    reconstruction_dir = output_dir / "reconstruction"
     output_dir.mkdir(parents=True, exist_ok=True)
     if export_audio:
         for directory in (reference_dir, reconstruction_dir):
@@ -198,16 +199,8 @@ def evaluate_stable_audio_vae(
     )
 
     data_root = Path(data_root)
-    has_external_manifest_dir = manifest_dir is not None
     manifest_dir = Path(manifest_dir) if manifest_dir is not None else data_root / "manifests"
     manifest_path = manifest_dir / "test.jsonl"
-    copied_manifest_path = output_path / "sample_manifest" / "test.jsonl"
-    if (
-        has_external_manifest_dir
-        and manifest_path.resolve() != copied_manifest_path.resolve()
-    ):
-        copied_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(manifest_path, copied_manifest_path)
     data_config = {
         "root": str(data_root),
         "sample_rate": int(sample_rate),
@@ -312,38 +305,34 @@ def evaluate_stable_audio_vae(
     if samples == 0:
         raise RuntimeError("Test loader produced no batches")
 
-    model_summary = {key: value / samples for key, value in sorted(sums.items())}
-    model_summary["rFAD"] = None
+    summary: dict[str, Any] = {
+        "num_samples": samples,
+        **{key: value / samples for key, value in sorted(sums.items())},
+        "rFAD": None,
+        "MUSHRA": "pending_human_test",
+    }
     if run_rfad:
         rfad_output_dir = output_path / f"rfad_{system_name}"
         rfad_output_dir.mkdir(parents=True, exist_ok=True)
-        model_summary["rFAD"] = _run_rfad(
+        summary["rFAD"] = _run_rfad(
             reference_dir, reconstruction_dir, fad_model, rfad_output_dir
         )
-
-    summary: dict[str, Any] = {
-        "num_samples": samples,
-        "num_exported_audio_samples": exported,
-        "sample_rate": sample_rate,
-        "channels": channels,
-        "manifest_dir": str(manifest_dir),
-        "pretrained_name": pretrained_name,
-        "system_name": system_name,
-        "stable_audio_sample_rate": model_sample_rate,
-        "stable_audio_channels": model_channels,
-        "latent_shapes": [list(shape) for shape in sorted(latent_shapes)],
-        "models": {system_name: model_summary},
-    }
 
     (output_path / "metrics.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    (output_path / "mushra_command.txt").write_text(
-        "ae-mushra prepare "
-        f"--reference-dir {reference_dir} "
-        f"--system {system_name}={reconstruction_dir} "
-        f"--output-dir {output_path / 'mushra'} "
-        f"--sample-rate {sample_rate}\n",
+    commands = (
+        f"# rFAD\nfadtk vggish {reference_dir} {reconstruction_dir}\n\n"
+        "# After a downstream generator exists:\n"
+        f"fadtk vggish {reference_dir} /path/to/generated  # gFAD\n"
+        f"fadtk clap-laion-music {reference_dir} /path/to/generated  # FAD-CLAP\n"
+        "# MuQ-Eval: run the official scorer over /path/to/generated.\n"
+    )
+    (output_path / "external_metrics_commands.txt").write_text(
+        commands,
         encoding="utf-8",
     )
+    stale_mushra_command = output_path / "mushra_command.txt"
+    if stale_mushra_command.exists():
+        stale_mushra_command.unlink()
     return summary
