@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Sequence
@@ -122,134 +123,158 @@ def evaluate_sa3_same(
     )
     if run_rfad and not export_audio:
         raise ValueError("Audio export must be enabled to compute rFAD")
-    if run_rfad and max_audio_samples is not None:
-        raise ValueError("--run-rfad cannot be combined with --max-audio-samples")
     output_path = Path(output_dir or "outputs/evaluation/sa3_same")
     reference_dir, reconstruction_dirs = _prepare_audio_dirs(
         output_path, model_names, export_audio
     )
-
-    data_root = Path(data_root)
-    manifest_dir = Path(manifest_dir) if manifest_dir is not None else data_root / "manifests"
-    sampled_manifest_dir = None
-    if sample_count is not None:
-        sampled_manifest_dir = Path(sample_manifest_dir or output_path / "sample_manifest")
-        write_sample_manifest(
-            manifest_dir / "test.jsonl",
-            sampled_manifest_dir,
-            sample_count=int(sample_count),
-            seed=int(sample_seed),
-            split="test",
+    rfad_temp_dir: tempfile.TemporaryDirectory[str] | None = None
+    rfad_reference_dir = reference_dir
+    rfad_reconstruction_dirs = reconstruction_dirs
+    if run_rfad and max_audio_samples is not None:
+        rfad_temp_dir = tempfile.TemporaryDirectory(
+            prefix="rfad_audio_", dir=str(output_path)
         )
-        manifest_dir = sampled_manifest_dir
-    manifest_path = manifest_dir / "test.jsonl"
-    export_track_ids = None
-    if max_audio_samples is not None:
-        export_track_ids = sample_manifest_track_ids(
+        rfad_root = Path(rfad_temp_dir.name)
+        rfad_reference_dir = rfad_root / "reference"
+        rfad_reconstruction_dirs = {name: rfad_root / name for name in model_names}
+        for directory in (rfad_reference_dir, *rfad_reconstruction_dirs.values()):
+            directory.mkdir(parents=True, exist_ok=True)
+
+    try:
+        data_root = Path(data_root)
+        manifest_dir = Path(manifest_dir) if manifest_dir is not None else data_root / "manifests"
+        sampled_manifest_dir = None
+        if sample_count is not None:
+            sampled_manifest_dir = Path(sample_manifest_dir or output_path / "sample_manifest")
+            write_sample_manifest(
+                manifest_dir / "test.jsonl",
+                sampled_manifest_dir,
+                sample_count=int(sample_count),
+                seed=int(sample_seed),
+                split="test",
+            )
+            manifest_dir = sampled_manifest_dir
+        manifest_path = manifest_dir / "test.jsonl"
+        export_track_ids = None
+        if max_audio_samples is not None:
+            export_track_ids = sample_manifest_track_ids(
+                manifest_path,
+                sample_count=int(max_audio_samples),
+                seed=int(sample_seed),
+            )
+        data_config = {
+            "root": str(data_root),
+            "sample_rate": int(sample_rate),
+            "duration_seconds": float(duration_seconds),
+            "channels": int(channels),
+            "num_workers": int(num_workers),
+            "pin_memory": bool(pin_memory),
+        }
+        loader = create_dataloader(
             manifest_path,
-            sample_count=int(max_audio_samples),
-            seed=int(sample_seed),
+            data_config,
+            batch_size=int(batch_size),
+            split="test",
+            shuffle=False,
         )
-    data_config = {
-        "root": str(data_root),
-        "sample_rate": int(sample_rate),
-        "duration_seconds": float(duration_seconds),
-        "channels": int(channels),
-        "num_workers": int(num_workers),
-        "pin_memory": bool(pin_memory),
-    }
-    loader = create_dataloader(
-        manifest_path,
-        data_config,
-        batch_size=int(batch_size),
-        split="test",
-        shuffle=False,
-    )
-    sample_rate = int(sample_rate)
-    channels = int(channels)
-    target_samples = round(sample_rate * float(duration_seconds))
+        sample_rate = int(sample_rate)
+        channels = int(channels)
+        target_samples = round(sample_rate * float(duration_seconds))
 
-    mrstft = MultiResolutionSTFTLoss(
-        tuple(int(value) for value in fft_sizes),
-        sample_rate=sample_rate,
-        hop_ratio=float(hop_ratio),
-        use_k_weighting=bool(use_k_weighting),
-        stereo_representations=bool(stereo_representations),
-        eps=float(eps),
-    ).to(selected_device)
-    mel = LogMelL1(
-        sample_rate,
-        n_fft=int(mel_n_fft),
-        hop_length=int(mel_hop_length),
-        n_mels=int(mel_n_mels),
-    ).to(selected_device)
-    band_errors = BandwiseSpectralErrors(
-        sample_rate,
-        n_fft=int(mel_n_fft),
-        hop_length=int(mel_hop_length),
-        n_mels=int(mel_n_mels),
-    ).to(selected_device)
+        mrstft = MultiResolutionSTFTLoss(
+            tuple(int(value) for value in fft_sizes),
+            sample_rate=sample_rate,
+            hop_ratio=float(hop_ratio),
+            use_k_weighting=bool(use_k_weighting),
+            stereo_representations=bool(stereo_representations),
+            eps=float(eps),
+        ).to(selected_device)
+        mel = LogMelL1(
+            sample_rate,
+            n_fft=int(mel_n_fft),
+            hop_length=int(mel_hop_length),
+            n_mels=int(mel_n_mels),
+        ).to(selected_device)
+        band_errors = BandwiseSpectralErrors(
+            sample_rate,
+            n_fft=int(mel_n_fft),
+            hop_length=int(mel_hop_length),
+            n_mels=int(mel_n_mels),
+        ).to(selected_device)
 
-    autoencoders = {
-        name: _load_sa3_autoencoder(name, selected_device) for name in model_names
-    }
-    sums: dict[str, defaultdict[str, float]] = {
-        name: defaultdict(float) for name in model_names
-    }
-    samples = 0
-    exported = 0
-    effective_max_batches = int(max_batches) if max_batches is not None else None
+        autoencoders = {
+            name: _load_sa3_autoencoder(name, selected_device) for name in model_names
+        }
+        sums: dict[str, defaultdict[str, float]] = {
+            name: defaultdict(float) for name in model_names
+        }
+        samples = 0
+        exported = 0
+        effective_max_batches = int(max_batches) if max_batches is not None else None
 
-    for batch_index, batch in enumerate(tqdm(loader, desc="SA3 SAME evaluation")):
-        if effective_max_batches is not None and batch_index >= int(effective_max_batches):
-            break
-        audio = batch["audio"].to(selected_device)
-        batch_size = audio.shape[0]
-        reconstructions: dict[str, torch.Tensor] = {}
+        for batch_index, batch in enumerate(tqdm(loader, desc="SA3 SAME evaluation")):
+            if effective_max_batches is not None and batch_index >= int(effective_max_batches):
+                break
+            audio = batch["audio"].to(selected_device)
+            batch_size = audio.shape[0]
+            reconstructions: dict[str, torch.Tensor] = {}
 
-        for name, autoencoder in autoencoders.items():
-            latents = autoencoder.encode(
-                audio,
-                sample_rate,
-                chunked=chunked,
-                chunk_size=chunk_size,
-                overlap=overlap,
-            )
-            decoded = autoencoder.decode(
-                latents,
-                chunked=chunked,
-                chunk_size=chunk_size,
-                overlap=overlap,
-            )
-            reconstruction = _match_reference_format(
-                decoded.float(),
-                source_rate=int(autoencoder.sample_rate),
-                target_rate=sample_rate,
-                target_channels=channels,
-                target_samples=target_samples,
-            )
-            reconstructions[name] = reconstruction
+            for name, autoencoder in autoencoders.items():
+                latents = autoencoder.encode(
+                    audio,
+                    sample_rate,
+                    chunked=chunked,
+                    chunk_size=chunk_size,
+                    overlap=overlap,
+                )
+                decoded = autoencoder.decode(
+                    latents,
+                    chunked=chunked,
+                    chunk_size=chunk_size,
+                    overlap=overlap,
+                )
+                reconstruction = _match_reference_format(
+                    decoded.float(),
+                    source_rate=int(autoencoder.sample_rate),
+                    target_rate=sample_rate,
+                    target_channels=channels,
+                    target_samples=target_samples,
+                )
+                reconstructions[name] = reconstruction
 
-            spectral, components = mrstft(reconstruction, audio)
-            values = {
-                "SI-SDR": float(si_sdr(reconstruction, audio)),
-                "MEL": float(mel(reconstruction, audio)),
-                "MR-STFT": float(spectral),
-                **{f"MR-STFT/{key}": float(value) for key, value in components.items()},
-            }
-            for key, value in band_errors(reconstruction, audio).items():
-                values[key] = None if value is None else float(value)
-            for key, value in values.items():
-                if value is None:
-                    continue
-                sums[name][key] += value * batch_size
+                spectral, components = mrstft(reconstruction, audio)
+                values = {
+                    "SI-SDR": float(si_sdr(reconstruction, audio)),
+                    "MEL": float(mel(reconstruction, audio)),
+                    "MR-STFT": float(spectral),
+                    **{f"MR-STFT/{key}": float(value) for key, value in components.items()},
+                }
+                for key, value in band_errors(reconstruction, audio).items():
+                    values[key] = None if value is None else float(value)
+                for key, value in values.items():
+                    if value is None:
+                        continue
+                    sums[name][key] += value * batch_size
 
-        if export_audio:
             for index, track_id in enumerate(batch["track_id"]):
                 track_id = str(track_id)
+                filename = f"{track_id}.wav"
+                if run_rfad and max_audio_samples is not None:
+                    torchaudio.save(
+                        rfad_reference_dir / filename,
+                        audio[index].cpu().clamp(-1, 1),
+                        sample_rate,
+                    )
+                    for name, reconstruction in reconstructions.items():
+                        torchaudio.save(
+                            rfad_reconstruction_dirs[name] / filename,
+                            reconstruction[index].cpu().clamp(-1, 1),
+                            sample_rate,
+                        )
+                if not export_audio:
+                    continue
                 if export_track_ids is not None and track_id not in export_track_ids:
                     continue
-                filename = f"{track_id}.wav"
                 torchaudio.save(
                     reference_dir / filename,
                     audio[index].cpu().clamp(-1, 1),
@@ -262,49 +287,55 @@ def evaluate_sa3_same(
                         sample_rate,
                     )
                 exported += 1
-        samples += batch_size
+            samples += batch_size
 
-    if samples == 0:
-        raise RuntimeError("Test loader produced no batches")
+        if samples == 0:
+            raise RuntimeError("Test loader produced no batches")
 
-    summary: dict[str, Any] = {
-        "num_samples": samples,
-        "num_exported_audio_samples": exported,
-        "sample_rate": sample_rate,
-        "channels": channels,
-        "manifest_dir": str(manifest_dir),
-        "sample_count": sample_count,
-        "sample_seed": int(sample_seed) if sample_count is not None else None,
-        "audio_sample_seed": int(sample_seed) if max_audio_samples is not None else None,
-        "models": {},
-    }
-    for name in model_names:
-        model_summary = {
-            key: value / samples for key, value in sorted(sums[name].items())
+        summary: dict[str, Any] = {
+            "num_samples": samples,
+            "num_exported_audio_samples": exported,
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "manifest_dir": str(manifest_dir),
+            "sample_count": sample_count,
+            "sample_seed": int(sample_seed) if sample_count is not None else None,
+            "audio_sample_seed": int(sample_seed) if max_audio_samples is not None else None,
+            "models": {},
         }
-        for key in BANDWISE_SPECTRAL_METRIC_NAMES:
-            model_summary.setdefault(key, None)
-        model_summary["rFAD"] = None
-        if run_rfad:
-            rfad_output_dir = output_path / f"rfad_{name}"
-            rfad_output_dir.mkdir(parents=True, exist_ok=True)
-            model_summary["rFAD"] = _run_rfad(
-                reference_dir, reconstruction_dirs[name], fad_model, rfad_output_dir
-            )
-        summary["models"][name] = model_summary
+        for name in model_names:
+            model_summary = {
+                key: value / samples for key, value in sorted(sums[name].items())
+            }
+            for key in BANDWISE_SPECTRAL_METRIC_NAMES:
+                model_summary.setdefault(key, None)
+            model_summary["rFAD"] = None
+            if run_rfad:
+                rfad_output_dir = output_path / f"rfad_{name}"
+                rfad_output_dir.mkdir(parents=True, exist_ok=True)
+                model_summary["rFAD"] = _run_rfad(
+                    rfad_reference_dir,
+                    rfad_reconstruction_dirs[name],
+                    fad_model,
+                    rfad_output_dir,
+                )
+            summary["models"][name] = model_summary
 
-    (output_path / "metrics.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    mushra_systems = " ".join(
-        f"--system {name}={reconstruction_dirs[name]}" for name in model_names
-    )
-    (output_path / "mushra_command.txt").write_text(
-        "ae-mushra prepare "
-        f"--reference-dir {reference_dir} "
-        f"{mushra_systems} "
-        f"--output-dir {output_path / 'mushra'} "
-        f"--sample-rate {sample_rate}\n",
-        encoding="utf-8",
-    )
-    return summary
+        (output_path / "metrics.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        mushra_systems = " ".join(
+            f"--system {name}={reconstruction_dirs[name]}" for name in model_names
+        )
+        (output_path / "mushra_command.txt").write_text(
+            "ae-mushra prepare "
+            f"--reference-dir {reference_dir} "
+            f"{mushra_systems} "
+            f"--output-dir {output_path / 'mushra'} "
+            f"--sample-rate {sample_rate}\n",
+            encoding="utf-8",
+        )
+        return summary
+    finally:
+        if rfad_temp_dir is not None:
+            rfad_temp_dir.cleanup()

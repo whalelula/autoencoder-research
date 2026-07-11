@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Sequence
@@ -195,8 +196,6 @@ def evaluate_stable_audio_vae(
     )
     if run_rfad and not export_audio:
         raise ValueError("Audio export must be enabled to compute rFAD")
-    if run_rfad and max_audio_samples is not None:
-        raise ValueError("--run-rfad cannot be combined with --max-audio-samples")
 
     output_path = Path(
         output_dir or "outputs/evaluation/stable_audio_open_1_0_vae_latent"
@@ -204,116 +203,141 @@ def evaluate_stable_audio_vae(
     reference_dir, reconstruction_dir = _prepare_audio_dirs(
         output_path, system_name, export_audio
     )
-
-    data_root = Path(data_root)
-    manifest_dir = Path(manifest_dir) if manifest_dir is not None else data_root / "manifests"
-    manifest_path = manifest_dir / "test.jsonl"
-    export_track_ids = None
-    if max_audio_samples is not None:
-        export_track_ids = sample_manifest_track_ids(
-            manifest_path,
-            sample_count=int(max_audio_samples),
-            seed=int(sample_seed),
+    rfad_temp_dir: tempfile.TemporaryDirectory[str] | None = None
+    rfad_reference_dir = reference_dir
+    rfad_reconstruction_dir = reconstruction_dir
+    if run_rfad and max_audio_samples is not None:
+        rfad_temp_dir = tempfile.TemporaryDirectory(
+            prefix="rfad_audio_", dir=str(output_path)
         )
-    data_config = {
-        "root": str(data_root),
-        "sample_rate": int(sample_rate),
-        "duration_seconds": float(duration_seconds),
-        "channels": int(channels),
-        "num_workers": int(num_workers),
-        "pin_memory": bool(pin_memory),
-    }
-    loader = create_dataloader(
-        manifest_path,
-        data_config,
-        batch_size=int(batch_size),
-        split="test",
-        shuffle=False,
-    )
-    sample_rate = int(sample_rate)
-    channels = int(channels)
-    target_samples = round(sample_rate * float(duration_seconds))
+        rfad_root = Path(rfad_temp_dir.name)
+        rfad_reference_dir = rfad_root / "reference"
+        rfad_reconstruction_dir = rfad_root / "reconstruction"
+        rfad_reference_dir.mkdir(parents=True, exist_ok=True)
+        rfad_reconstruction_dir.mkdir(parents=True, exist_ok=True)
 
-    autoencoder, model_config = _load_stable_audio_pretransform(
-        pretrained_name, selected_device, half=half
-    )
-    model_sample_rate = _model_sample_rate(model_config, autoencoder)
-    model_channels = _model_channels(model_config, autoencoder)
-    model_samples = round(model_sample_rate * float(duration_seconds))
-
-    mrstft = MultiResolutionSTFTLoss(
-        tuple(int(value) for value in fft_sizes),
-        sample_rate=sample_rate,
-        hop_ratio=float(hop_ratio),
-        use_k_weighting=bool(use_k_weighting),
-        stereo_representations=bool(stereo_representations),
-        eps=float(eps),
-    ).to(selected_device)
-    mel = LogMelL1(
-        sample_rate,
-        n_fft=int(mel_n_fft),
-        hop_length=int(mel_hop_length),
-        n_mels=int(mel_n_mels),
-    ).to(selected_device)
-    band_errors = BandwiseSpectralErrors(
-        sample_rate,
-        n_fft=int(mel_n_fft),
-        hop_length=int(mel_hop_length),
-        n_mels=int(mel_n_mels),
-    ).to(selected_device)
-
-    sums: defaultdict[str, float] = defaultdict(float)
-    latent_shapes: set[tuple[int, ...]] = set()
-    samples = 0
-    exported = 0
-    effective_max_batches = int(max_batches) if max_batches is not None else None
-
-    for batch_index, batch in enumerate(tqdm(loader, desc="Stable Audio VAE evaluation")):
-        if effective_max_batches is not None and batch_index >= int(effective_max_batches):
-            break
-        audio = batch["audio"].to(selected_device)
-        current_batch_size = audio.shape[0]
-
-        model_audio = _match_reference_format(
-            audio,
-            source_rate=sample_rate,
-            target_rate=model_sample_rate,
-            target_channels=model_channels,
-            target_samples=model_samples,
-        )
-        if half:
-            model_audio = model_audio.half()
-        latents = autoencoder.encode(model_audio)
-        latent_shapes.add(tuple(int(dim) for dim in latents.shape[1:]))
-        decoded = autoencoder.decode(latents)
-        reconstruction = _match_reference_format(
-            decoded.float(),
-            source_rate=model_sample_rate,
-            target_rate=sample_rate,
-            target_channels=channels,
-            target_samples=target_samples,
-        )
-
-        spectral, components = mrstft(reconstruction, audio)
-        values = {
-            "SI-SDR": float(si_sdr(reconstruction, audio)),
-            "MEL": float(mel(reconstruction, audio)),
-            "MR-STFT": float(spectral),
-            **{f"MR-STFT/{key}": float(value) for key, value in components.items()},
+    try:
+        data_root = Path(data_root)
+        manifest_dir = Path(manifest_dir) if manifest_dir is not None else data_root / "manifests"
+        manifest_path = manifest_dir / "test.jsonl"
+        export_track_ids = None
+        if max_audio_samples is not None:
+            export_track_ids = sample_manifest_track_ids(
+                manifest_path,
+                sample_count=int(max_audio_samples),
+                seed=int(sample_seed),
+            )
+        data_config = {
+            "root": str(data_root),
+            "sample_rate": int(sample_rate),
+            "duration_seconds": float(duration_seconds),
+            "channels": int(channels),
+            "num_workers": int(num_workers),
+            "pin_memory": bool(pin_memory),
         }
-        for key, value in band_errors(reconstruction, audio).items():
-            values[key] = None if value is None else float(value)
-        for key, value in values.items():
-            if value is None:
-                continue
-            sums[key] += value * current_batch_size
+        loader = create_dataloader(
+            manifest_path,
+            data_config,
+            batch_size=int(batch_size),
+            split="test",
+            shuffle=False,
+        )
+        sample_rate = int(sample_rate)
+        channels = int(channels)
+        target_samples = round(sample_rate * float(duration_seconds))
 
-        if export_audio:
+        autoencoder, model_config = _load_stable_audio_pretransform(
+            pretrained_name, selected_device, half=half
+        )
+        model_sample_rate = _model_sample_rate(model_config, autoencoder)
+        model_channels = _model_channels(model_config, autoencoder)
+        model_samples = round(model_sample_rate * float(duration_seconds))
+
+        mrstft = MultiResolutionSTFTLoss(
+            tuple(int(value) for value in fft_sizes),
+            sample_rate=sample_rate,
+            hop_ratio=float(hop_ratio),
+            use_k_weighting=bool(use_k_weighting),
+            stereo_representations=bool(stereo_representations),
+            eps=float(eps),
+        ).to(selected_device)
+        mel = LogMelL1(
+            sample_rate,
+            n_fft=int(mel_n_fft),
+            hop_length=int(mel_hop_length),
+            n_mels=int(mel_n_mels),
+        ).to(selected_device)
+        band_errors = BandwiseSpectralErrors(
+            sample_rate,
+            n_fft=int(mel_n_fft),
+            hop_length=int(mel_hop_length),
+            n_mels=int(mel_n_mels),
+        ).to(selected_device)
+
+        sums: defaultdict[str, float] = defaultdict(float)
+        latent_shapes: set[tuple[int, ...]] = set()
+        samples = 0
+        exported = 0
+        effective_max_batches = int(max_batches) if max_batches is not None else None
+
+        for batch_index, batch in enumerate(tqdm(loader, desc="Stable Audio VAE evaluation")):
+            if effective_max_batches is not None and batch_index >= int(effective_max_batches):
+                break
+            audio = batch["audio"].to(selected_device)
+            current_batch_size = audio.shape[0]
+
+            model_audio = _match_reference_format(
+                audio,
+                source_rate=sample_rate,
+                target_rate=model_sample_rate,
+                target_channels=model_channels,
+                target_samples=model_samples,
+            )
+            if half:
+                model_audio = model_audio.half()
+            latents = autoencoder.encode(model_audio)
+            latent_shapes.add(tuple(int(dim) for dim in latents.shape[1:]))
+            decoded = autoencoder.decode(latents)
+            reconstruction = _match_reference_format(
+                decoded.float(),
+                source_rate=model_sample_rate,
+                target_rate=sample_rate,
+                target_channels=channels,
+                target_samples=target_samples,
+            )
+
+            spectral, components = mrstft(reconstruction, audio)
+            values = {
+                "SI-SDR": float(si_sdr(reconstruction, audio)),
+                "MEL": float(mel(reconstruction, audio)),
+                "MR-STFT": float(spectral),
+                **{f"MR-STFT/{key}": float(value) for key, value in components.items()},
+            }
+            for key, value in band_errors(reconstruction, audio).items():
+                values[key] = None if value is None else float(value)
+            for key, value in values.items():
+                if value is None:
+                    continue
+                sums[key] += value * current_batch_size
+
             for index, track_id in enumerate(batch["track_id"]):
                 track_id = str(track_id)
+                filename = f"{track_id}.wav"
+                if run_rfad and max_audio_samples is not None:
+                    torchaudio.save(
+                        rfad_reference_dir / filename,
+                        audio[index].cpu().clamp(-1, 1),
+                        sample_rate,
+                    )
+                    torchaudio.save(
+                        rfad_reconstruction_dir / filename,
+                        reconstruction[index].cpu().clamp(-1, 1),
+                        sample_rate,
+                    )
+                if not export_audio:
+                    continue
                 if export_track_ids is not None and track_id not in export_track_ids:
                     continue
-                filename = f"{track_id}.wav"
                 torchaudio.save(
                     reference_dir / filename,
                     audio[index].cpu().clamp(-1, 1),
@@ -325,43 +349,53 @@ def evaluate_stable_audio_vae(
                     sample_rate,
                 )
                 exported += 1
-        samples += current_batch_size
+            samples += current_batch_size
 
-    if samples == 0:
-        raise RuntimeError("Test loader produced no batches")
+        if samples == 0:
+            raise RuntimeError("Test loader produced no batches")
 
-    summary: dict[str, Any] = {
-        "num_samples": samples,
-        "num_exported_audio_samples": exported,
-        "audio_sample_seed": int(sample_seed) if max_audio_samples is not None else None,
-        **{key: value / samples for key, value in sorted(sums.items())},
-        "rFAD": None,
-        "MUSHRA": "pending_human_test",
-    }
-    for key in BANDWISE_SPECTRAL_METRIC_NAMES:
-        summary.setdefault(key, None)
-    if run_rfad:
-        rfad_output_dir = output_path / f"rfad_{system_name}"
-        rfad_output_dir.mkdir(parents=True, exist_ok=True)
-        summary["rFAD"] = _run_rfad(
-            reference_dir, reconstruction_dir, fad_model, rfad_output_dir
+        summary: dict[str, Any] = {
+            "num_samples": samples,
+            "num_exported_audio_samples": exported,
+            "audio_sample_seed": int(sample_seed) if max_audio_samples is not None else None,
+            **{key: value / samples for key, value in sorted(sums.items())},
+            "rFAD": None,
+            "MUSHRA": "pending_human_test",
+        }
+        for key in BANDWISE_SPECTRAL_METRIC_NAMES:
+            summary.setdefault(key, None)
+        if run_rfad:
+            rfad_output_dir = output_path / f"rfad_{system_name}"
+            rfad_output_dir.mkdir(parents=True, exist_ok=True)
+            summary["rFAD"] = _run_rfad(
+                rfad_reference_dir, rfad_reconstruction_dir, fad_model, rfad_output_dir
+            )
+
+        (output_path / "metrics.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-
-    (output_path / "metrics.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    commands = (
-        f"# rFAD\nfadtk vggish {reference_dir} {reconstruction_dir}\n\n"
-        "# After a downstream generator exists:\n"
-        f"fadtk vggish {reference_dir} /path/to/generated  # gFAD\n"
-        f"fadtk clap-laion-music {reference_dir} /path/to/generated  # FAD-CLAP\n"
-        "# MuQ-Eval: run the official scorer over /path/to/generated.\n"
-    )
-    (output_path / "external_metrics_commands.txt").write_text(
-        commands,
-        encoding="utf-8",
-    )
-    stale_mushra_command = output_path / "mushra_command.txt"
-    if stale_mushra_command.exists():
-        stale_mushra_command.unlink()
-    return summary
+        if max_audio_samples is None:
+            rfad_command = f"fadtk vggish {reference_dir} {reconstruction_dir}"
+        else:
+            rfad_command = (
+                "# rFAD used temporary full-set audio exports. To reproduce it "
+                "manually, rerun without --max-audio-samples or export full audio dirs."
+            )
+        commands = (
+            f"# rFAD\n{rfad_command}\n\n"
+            "# After a downstream generator exists:\n"
+            f"fadtk vggish {reference_dir} /path/to/generated  # gFAD\n"
+            f"fadtk clap-laion-music {reference_dir} /path/to/generated  # FAD-CLAP\n"
+            "# MuQ-Eval: run the official scorer over /path/to/generated.\n"
+        )
+        (output_path / "external_metrics_commands.txt").write_text(
+            commands,
+            encoding="utf-8",
+        )
+        stale_mushra_command = output_path / "mushra_command.txt"
+        if stale_mushra_command.exists():
+            stale_mushra_command.unlink()
+        return summary
+    finally:
+        if rfad_temp_dir is not None:
+            rfad_temp_dir.cleanup()
