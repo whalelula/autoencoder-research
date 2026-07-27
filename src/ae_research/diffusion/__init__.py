@@ -1,12 +1,21 @@
-"""Reserved interfaces for the downstream latent diffusion stage.
-
-No denoiser, conditioner, or scheduler is selected yet. Keeping this package
-empty avoids silently baking an arbitrary diffusion design into AE experiments.
-"""
+"""Interfaces and shared utilities for downstream latent diffusion."""
 
 from typing import Protocol
 
 import torch
+
+from .codec import (
+    FrozenAutoencoderCodec,
+    FrozenCodecAdapter,
+    LatentNormalizer,
+    load_frozen_codec,
+)
+from .config import (
+    DEFAULT_DIT_DEPTH,
+    DEFAULT_TEXT_ENCODER,
+    load_dit_config,
+    validate_dit_config,
+)
 
 
 class LatentCodec(Protocol):
@@ -19,5 +28,15 @@ class LatentGenerator(Protocol):
     def sample(self, batch_size: int, num_frames: int, **conditions) -> torch.Tensor: ...
 
 
-__all__ = ["LatentCodec", "LatentGenerator"]
-
+__all__ = [
+    "DEFAULT_DIT_DEPTH",
+    "DEFAULT_TEXT_ENCODER",
+    "FrozenAutoencoderCodec",
+    "FrozenCodecAdapter",
+    "LatentCodec",
+    "LatentGenerator",
+    "LatentNormalizer",
+    "load_dit_config",
+    "load_frozen_codec",
+    "validate_dit_config",
+]

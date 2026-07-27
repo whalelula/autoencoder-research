@@ -19,16 +19,20 @@ dependencies = [
   "soundfile>=0.12",
   "tensorboard>=2.14",
   "tqdm>=4.66",
-  "transformers>=4.40,<4.47",
+  "transformers>=4.53,<5",
 ]
 
 [project.optional-dependencies]
 eval = ["fadtk>=1.1.0"]
+dit = ["sentencepiece>=0.2"]
 dev = ["pytest>=7.4", "ruff>=0.5"]
 
 [project.scripts]
 ae-prepare = "ae_research.cli.prepare_mtg_jamendo:main"
 ae-preprocess-audio = "ae_research.cli.preprocess_audio:main"
+ae-prepare-dit-tags = "ae_research.cli.prepare_dit_tags:main"
+ae-dit-train = "ae_research.cli.train_dit:main"
+ae-dit-evaluate = "ae_research.cli.evaluate_dit:main"
 ae-train = "ae_research.cli.train:main"
 ae-evaluate = "ae_research.cli.evaluate:main"
 ae-sample-manifest = "ae_research.cli.sample_manifest:main"
