@@ -482,7 +482,12 @@ def _validate_training(training: Mapping[str, Any]) -> None:
             _positive_int(training[name], f"training.{name}")
     if "warmup_steps" in training:
         _positive_int(training["warmup_steps"], "training.warmup_steps", allow_zero=True)
-    for name in ("validate_every_steps", "sample_every_steps", "log_every_steps"):
+    for name in (
+        "validate_every_steps",
+        "sample_every_steps",
+        "log_every_steps",
+        "loss_curve_every_steps",
+    ):
         if name in training:
             _positive_int(training[name], f"training.{name}")
     sample_count = _first(

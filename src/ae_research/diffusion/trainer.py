@@ -317,6 +317,51 @@ class DiffusionHistoryWriter:
             csv.DictWriter(handle, fieldnames=self.FIELDS).writerow(row)
 
 
+def plot_diffusion_history(history_path: str | Path, output_path: str | Path) -> None:
+    """Plot train and validation losses from the persisted DiT history."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    history_path = Path(history_path)
+    if not history_path.is_file():
+        return
+    with history_path.open("r", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        return
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axes = plt.subplots(1, len(LOSS_NAMES), figsize=(15, 4.5))
+    for axis, metric in zip(axes, LOSS_NAMES):
+        for split, style in (("train", "-"), ("val", "--")):
+            selected = [
+                (int(row["step"]), float(row[metric]))
+                for row in rows
+                if row["split"] == split and row.get(metric)
+            ]
+            if selected:
+                steps, values = zip(*selected)
+                axis.plot(steps, values, style, label=split, alpha=0.85)
+        axis.set_title(metric)
+        axis.set_xlabel("optimizer step")
+        axis.grid(alpha=0.25)
+        if axis.lines:
+            axis.legend()
+    figure.tight_layout()
+    temporary = output_path.with_name(
+        f".{output_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        figure.savefig(temporary, format="png", dpi=160)
+        os.replace(temporary, output_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+        plt.close(figure)
+
+
 def _codec_kind(autoencoder_config: Mapping[str, Any]) -> str:
     candidates = (
         autoencoder_config.get("type"),
@@ -813,6 +858,12 @@ class DiTTrainer:
             )
         )
 
+    def _update_loss_curve(self) -> None:
+        plot_diffusion_history(
+            self.output_dir / "dit_history.csv",
+            self.output_dir / "loss_curves.png",
+        )
+
     def _checkpoint_state(self, *, epoch_complete: bool) -> dict[str, Any]:
         return build_checkpoint_state(
             model=self.model,
@@ -836,6 +887,14 @@ class DiTTrainer:
         atomic_save_checkpoint(
             self._checkpoint_state(epoch_complete=epoch_complete), path
         )
+
+    def save_interrupted_checkpoints(self) -> None:
+        """Save the latest resumable state without replacing a validated best."""
+        state = self._checkpoint_state(epoch_complete=False)
+        atomic_save_checkpoint(state, self.checkpoint_dir / "last.pt")
+        best_path = self.checkpoint_dir / "best.pt"
+        if not best_path.is_file():
+            atomic_save_checkpoint(state, best_path)
 
     def load_checkpoint(self, path: str | Path) -> None:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
@@ -964,10 +1023,16 @@ class DiTTrainer:
             if not prompt:
                 prompt = _dataset_prompt(self.val_loader.dataset, dataset_index)
             safe_track = re.sub(r"[^A-Za-z0-9_.-]+", "_", track_id)[:80]
-            filename = f"{slot:02d}_{safe_track}_generated.wav"
+            generated_filename = f"{slot:02d}_{safe_track}_generated.wav"
+            reference_filename = f"{slot:02d}_{safe_track}_reference.wav"
             torchaudio.save(
-                output_dir / filename,
+                output_dir / generated_filename,
                 generated[slot].detach().cpu().clamp(-1.0, 1.0),
+                sample_rate,
+            )
+            torchaudio.save(
+                output_dir / reference_filename,
+                audio[slot].detach().cpu().clamp(-1.0, 1.0),
                 sample_rate,
             )
             manifest["samples"].append(
@@ -976,7 +1041,9 @@ class DiTTrainer:
                     "dataset_index": int(dataset_index),
                     "track_id": track_id,
                     "text": prompt,
-                    "audio": filename,
+                    "audio": generated_filename,
+                    "generated_audio": generated_filename,
+                    "reference_audio": reference_filename,
                 }
             )
         _atomic_json_dump(manifest, output_dir / "prompts.json")
@@ -1006,6 +1073,9 @@ class DiTTrainer:
     def train(self) -> dict[str, float | int]:
         accumulation = int(self.train_config.get("grad_accumulation_steps", 1))
         log_every = int(self.train_config.get("log_every_steps", 20))
+        loss_curve_every = int(
+            self.train_config.get("loss_curve_every_steps", log_every)
+        )
         validate_every = int(self.train_config.get("validate_every_steps", 200))
         checkpoint_every = int(
             self.train_config.get("checkpoint_every_steps", 2_000)
@@ -1027,7 +1097,6 @@ class DiTTrainer:
                 for batch_index, batch in enumerate(progress, start=1):
                     if epoch == self.start_epoch and batch_index <= self.resume_batch_in_epoch:
                         continue
-                    self.current_batch_in_epoch = batch_index
                     losses, batch_size = self._forward_batch(batch)
                     group_start = ((batch_index - 1) // accumulation) * accumulation + 1
                     group_size = min(
@@ -1054,9 +1123,15 @@ class DiTTrainer:
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
                     self.scheduler.step()
+                    self.current_batch_in_epoch = batch_index
                     progress.set_postfix(total=f"{float(losses['total'].detach()):.4f}")
 
-                    if log_every > 0 and self.global_step % log_every == 0:
+                    log_due = log_every > 0 and self.global_step % log_every == 0
+                    curve_due = (
+                        loss_curve_every > 0
+                        and self.global_step % loss_curve_every == 0
+                    )
+                    if log_due or curve_due:
                         metrics = {
                             name: rolling[name] / max(rolling_samples, 1)
                             for name in LOSS_NAMES
@@ -1064,6 +1139,8 @@ class DiTTrainer:
                         self._write_metrics(
                             split="train", epoch=epoch, metrics=metrics
                         )
+                        if curve_due:
+                            self._update_loss_curve()
                         rolling.clear()
                         rolling_samples = 0
                     if validate_every > 0 and self.global_step % validate_every == 0:
@@ -1084,16 +1161,14 @@ class DiTTrainer:
                         name: rolling[name] / rolling_samples for name in LOSS_NAMES
                     }
                     self._write_metrics(split="train", epoch=epoch, metrics=metrics)
+                self._update_loss_curve()
                 self.current_batch_in_epoch = len(self.train_loader)
                 self.save_checkpoint(
                     self.checkpoint_dir / "last.pt", epoch_complete=True
                 )
         except KeyboardInterrupt:
             interrupted = True
-            if self.global_step > 0:
-                self.save_checkpoint(
-                    self.checkpoint_dir / "last.pt", epoch_complete=False
-                )
+            self.save_interrupted_checkpoints()
             raise
         finally:
             if interrupted:
@@ -1103,6 +1178,7 @@ class DiTTrainer:
             raise RuntimeError("DiT training completed without an optimizer update")
         if self.last_validation_step != self.global_step:
             self.validate()
+        self._update_loss_curve()
         self.save_checkpoint(self.checkpoint_dir / "last.pt", epoch_complete=True)
         best_path = self.checkpoint_dir / "best.pt"
         if not best_path.is_file():
@@ -1127,5 +1203,6 @@ __all__ = [
     "Trainer",
     "atomic_save_checkpoint",
     "build_checkpoint_state",
+    "plot_diffusion_history",
     "select_fixed_listening_indices",
 ]

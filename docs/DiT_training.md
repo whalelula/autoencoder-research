@@ -2,7 +2,7 @@
 
 本文说明如何使用仓库中的 text-conditioned audio DiT，评估已训练 autoencoder 的下游生成能力。当前流程只负责接通数据清单、冻结的 T5Gemma 文本条件、DiT 训练、validation 试听和 test gFAD；不会自动下载 MTG-Jamendo 音频，也不会自动启动训练。
 
-参考配置是 [`configs/dit_mert95m_1k_5s.yaml`](../configs/dit_mert95m_1k_5s.yaml)。其中 autoencoder 配置和 checkpoint 路径必须换成实际待评估模型。
+参考配置是 `[configs/dit_mert330m_1k_5s.yaml](../configs/dit_mert330m_1k_5s.yaml)`。其中 autoencoder 配置和 checkpoint 路径必须换成实际待评估模型。
 
 ## 1. 环境安装
 
@@ -36,6 +36,8 @@ ae-dit-train --help
 ae-dit-evaluate --help
 ```
 
+
+
 ## 2. 数据和标签准备
 
 输入使用项目现有的 MTG-Jamendo 抽样清单。清单记录需要包含音频路径以及 genre、instrument、mood 标签；预处理会规范化标签，按 `genre, instrument, mood` 的顺序用英文逗号拼接，并保存为 `text` 字段。
@@ -45,13 +47,13 @@ ae-dit-evaluate --help
 先只生成带文本的 DiT 清单（不加载 Transformers，也不访问网络）：
 
 ```bash
-ae-prepare-dit-tags --config configs/dit_mert95m_1k_5s.yaml --manifests-only
+ae-prepare-dit-tags --config configs/dit_mert330m_1k_5s.yaml --manifests-only
 ```
 
 随后用冻结的最小 T5Gemma 版本 `google/t5gemma-s-s-ul2` 预计算 token-level text embeddings：
 
 ```bash
-ae-prepare-dit-tags --config configs/dit_mert95m_1k_5s.yaml --device cuda
+ae-prepare-dit-tags --config configs/dit_mert330m_1k_5s.yaml --device cuda
 ```
 
 T5Gemma 是受访问许可约束的 Hugging Face 模型。首次使用前需要在模型页面接受许可并登录：
@@ -63,7 +65,7 @@ huggingface-cli login
 若模型已放入本机或共享缓存，可严格禁止联网：
 
 ```bash
-ae-prepare-dit-tags --config configs/dit_mert95m_1k_5s.yaml --device cuda --local-files-only
+ae-prepare-dit-tags --config configs/dit_mert330m_1k_5s.yaml --device cuda --local-files-only
 ```
 
 建议把 Hugging Face 缓存放在持久磁盘。PowerShell 示例：
@@ -147,23 +149,23 @@ L_total = L_x + lambda_repa * L_repa
 启动训练：
 
 ```bash
-ae-dit-train --config configs/dit_mert95m_1k_5s.yaml --device cuda
+ae-dit-train --config configs/dit_mert330m_1k_5s.yaml --device cuda
 ```
 
 断点续训通过配置指定：
 
 ```yaml
 training:
-  resume_from: runs/dit_mert95m_1k_5s/checkpoints/latest.pt
+  resume_from: runs/dit_mert330m_1k_5s/checkpoints/latest.pt
 ```
 
 TensorBoard：
 
 ```bash
-tensorboard --logdir runs/dit_mert95m_1k_5s/tensorboard_dit
+tensorboard --logdir runs/dit_mert330m_1k_5s/tensorboard_dit
 ```
 
-训练会汇报 `total`、`x_prediction`、`repa_internal_guidance` 以及 Muon/AdamW 的当前 learning rate，同时写入 TensorBoard 和 `dit_history.csv`。
+训练会汇报 `total`、`x_prediction`、`repa_internal_guidance` 以及 Muon/AdamW 的当前 learning rate，同时写入 TensorBoard 和 `dit_history.csv`。`training.loss_curve_every_steps` 控制每隔多少个 optimizer step 原子更新 `loss_curves.png`；未配置时默认使用 `log_every_steps`。
 
 每次 validation 使用固定随机种子选择同一组 5 条 prompt，并使用 DiT 的 padding collator 对不同长度的 text tokens 组 batch。生成结果经冻结 decoder 保存到 `listening/step_*`，其中包含 reference、generated WAV 和记录 prompt/seed/track id 的 metadata，便于跨 step 人工对比。checkpoint 会保存这 5 条索引和随机种子，resume 后保持一致。
 
@@ -175,8 +177,8 @@ tensorboard --logdir runs/dit_mert95m_1k_5s/tensorboard_dit
 
 ```bash
 ae-dit-evaluate \
-  --config configs/dit_mert95m_1k_5s.yaml \
-  --checkpoint runs/dit_mert95m_1k_5s/checkpoints/best.pt \
+  --config configs/dit_mert330m_1k_5s.yaml \
+  --checkpoint runs/dit_mert330m_1k_5s/checkpoints/best.pt \
   --device cuda \
   --run-gfad
 ```
@@ -184,7 +186,7 @@ ae-dit-evaluate \
 Windows PowerShell 可写成一行，或用反引号换行。只生成音频、不运行 FADtk：
 
 ```bash
-ae-dit-evaluate --config configs/dit_mert95m_1k_5s.yaml --checkpoint runs/dit_mert95m_1k_5s/checkpoints/best.pt --device cuda --skip-gfad
+ae-dit-evaluate --config configs/dit_mert330m_1k_5s.yaml --checkpoint runs/dit_mert330m_1k_5s/checkpoints/best.pt --device cuda --skip-gfad
 ```
 
 当 `evaluation.run_after_training: true` 时，trainer 在完成训练后会直接调用同一个 evaluator，并使用 best checkpoint。若当前环境未安装 FADtk，可把 `evaluation.gfad.enabled` 或 `run_after_training` 设为 `false`，之后再独立评估。

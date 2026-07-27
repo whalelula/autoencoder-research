@@ -13,15 +13,15 @@ data:
 
 autoencoder:
   type: semantic
-  config_path: configs/smoke_test_mert95m_1k_5s_5epoch.yaml
-  checkpoint_path: runs/smoke_test_mert95m_1k_5s_5epoch/checkpoints/best.pt
+  config_path: configs/dam_mert330m_1k_5s.yaml
+  checkpoint_path: runs/dam_mert330m_1k_5s_v2/checkpoints/best.pt
   normalizer:
     enabled: false
     stats_path: null
     eps: 1.0e-8
 
 dit:
-  model_dim: 768
+  model_dim: 1024
   text_dim: 512
   depth: 11
   num_heads: 8
@@ -72,10 +72,10 @@ optimizer:
     eps: 1.0e-8
 
 training:
-  output_dir: runs/dit_mert95m_1k_5s
+  output_dir: runs/dit_mert330m_1k_5s
   epochs: 100
-  batch_size: 8
-  grad_accumulation_steps: 2
+  batch_size: 32
+  grad_accumulation_steps: 1
   mixed_precision: bf16
   amp: true
   grad_clip_norm: 1.0
@@ -83,10 +83,12 @@ training:
   warmup_steps: 150
   min_lr_ratio: 0.05
   log_every_steps: 20
-  validate_every_steps: 200
-  checkpoint_every_steps: 2000
-  max_validation_batches: null
-  resume_from: null
+  loss_curve_every_steps: 20
+  validate_every_steps: 2000
+  checkpoint_every_steps: 5000
+  max_validation_batches: 100
+  resume_from: runs/dit_mert330m_1k_5s/checkpoints/last.pt
+  # resume_from: null
   num_validation_samples: 5
   listening:
     selection_seed: 30042
@@ -94,12 +96,12 @@ training:
     validation_seed: 10042
 
 evaluation:
-  output_dir: outputs/dit_mert95m_1k_5s
+  output_dir: outputs/dit_mert330m_1k_5s
   batch_size: 8
   sampling_steps: 50
   seed: 42
   max_batches: null
-  run_after_training: true
+  run_after_training: false
   gfad:
     enabled: true
     model: vggish
