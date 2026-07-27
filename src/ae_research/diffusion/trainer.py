@@ -8,6 +8,7 @@ import math
 import os
 import random
 import re
+import shutil
 import uuid
 import warnings
 from collections import defaultdict
@@ -35,6 +36,23 @@ from .optim import build_muon_adamw
 
 
 LOSS_NAMES = ("total", "x_prediction", "repa_internal_guidance")
+
+
+def _reset_fresh_output_dir(output_dir: Path) -> None:
+    """Remove DiT artifacts before starting a non-resumed training run."""
+    for relative in (
+        "dit_history.csv",
+        "loss_curves.png",
+        "resolved_dit_config.yaml",
+        "tensorboard_dit",
+        "checkpoints",
+        "listening",
+    ):
+        path = output_dir / relative
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
 
 
 def _seed_everything(seed: int) -> None:
@@ -508,6 +526,9 @@ class DiTTrainer:
             )
 
         self.output_dir = Path(self.train_config["output_dir"])
+        resume_from = self.train_config.get("resume_from")
+        if not resume_from:
+            _reset_fresh_output_dir(self.output_dir)
         self.checkpoint_dir = self.output_dir / "checkpoints"
         self.sample_dir = self.output_dir / "listening"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -636,7 +657,6 @@ class DiTTrainer:
         self.last_validation_step = -1
         self.current_epoch = 0
         self.current_batch_in_epoch = 0
-        resume_from = self.train_config.get("resume_from")
         if resume_from:
             self.load_checkpoint(resume_from)
 

@@ -9,6 +9,7 @@ torch = pytest.importorskip("torch")
 from ae_research.diffusion.trainer import (  # noqa: E402
     DiTTrainer,
     DiffusionHistoryWriter,
+    _reset_fresh_output_dir,
     _warmup_cosine_multiplier,
     atomic_save_checkpoint,
     build_checkpoint_state,
@@ -34,6 +35,23 @@ class _PromptDataset:
 
     def __getitem__(self, index: int):
         return self.records[index]
+
+
+def test_reset_fresh_output_dir_removes_previous_dit_artifacts(tmp_path):
+    for directory in ("tensorboard_dit", "checkpoints", "listening"):
+        path = tmp_path / directory
+        path.mkdir()
+        (path / "old-output").write_text("stale", encoding="utf-8")
+    for filename in (
+        "dit_history.csv",
+        "loss_curves.png",
+        "resolved_dit_config.yaml",
+    ):
+        (tmp_path / filename).write_text("stale", encoding="utf-8")
+
+    _reset_fresh_output_dir(tmp_path)
+
+    assert not any(tmp_path.iterdir())
 
 
 def test_shared_warmup_cosine_multiplier_preserves_lr_ratio():
