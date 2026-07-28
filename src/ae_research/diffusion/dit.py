@@ -391,6 +391,20 @@ class AudioDiffusionTransformer(nn.Module):
             yield block.ff.in_proj.weight
             yield block.ff.out_proj.weight
 
+    def high_lr_parameters(self) -> Iterable[nn.Parameter]:
+        """Yield zero-initialized branches that need to leave zero promptly."""
+        yield self.preprocess_conv.conv.weight
+        for block in self.blocks:
+            yield block.self_attn.output_projection.weight
+            yield block.cross_attn.output_projection.weight
+            yield block.ff.out_proj.weight
+            yield block.ff.out_proj.bias
+        yield self.output_projection.weight
+        yield self.postprocess_conv.conv.weight
+        if self.repa_head is not None:
+            yield self.repa_head[-1].weight
+            yield self.repa_head[-1].bias
+
     @classmethod
     def from_config(
         cls, config: dict[str, Any], *, latent_dim: int

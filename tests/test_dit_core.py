@@ -7,8 +7,10 @@ torch = pytest.importorskip("torch")
 from ae_research.diffusion.dit import AudioDiffusionTransformer  # noqa: E402
 from ae_research.diffusion.flow_matching import (  # noqa: E402
     XPredictionObjective,
+    euler_sample,
     flow_interpolate,
     internal_guidance_prediction,
+    resolve_internal_guidance,
     sample_truncated_logit_normal,
 )
 from ae_research.diffusion.optim import build_muon_adamw  # noqa: E402
@@ -92,6 +94,55 @@ def test_internal_guidance_uses_base_to_full_extrapolation():
     assert internal_guidance_prediction(full, base, scale=1.0) is full
 
 
+class _GuidanceModel(torch.nn.Module):
+    def __init__(self, *, return_base: bool) -> None:
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(()))
+        self.return_base = return_base
+
+    def forward(self, value, timestep, **conditions):
+        del timestep, conditions
+        outputs = {"x_pred": torch.zeros_like(value) + self.anchor}
+        if self.return_base:
+            outputs["base_x_pred"] = torch.ones_like(value) + self.anchor
+        return outputs
+
+
+def test_euler_sample_really_applies_and_requires_internal_guidance():
+    conditions = {
+        "shape": (1, 2, 3),
+        "duration": torch.tensor([5.0]),
+        "text_embedding": torch.zeros(1, 1, 4),
+        "text_mask": torch.ones(1, 1, dtype=torch.bool),
+        "steps": 1,
+        "t_eps": 0.05,
+        "internal_guidance_enabled": True,
+        "guidance_scale": 2.0,
+    }
+    guided = euler_sample(_GuidanceModel(return_base=True), **conditions)
+    torch.testing.assert_close(guided, torch.full_like(guided, -1.0))
+    with pytest.raises(RuntimeError, match="did not return"):
+        euler_sample(_GuidanceModel(return_base=False), **conditions)
+
+
+def test_internal_guidance_config_is_explicit_and_legacy_compatible():
+    explicit = resolve_internal_guidance(
+        {
+            "sampling": {"guidance_scale": 1.0},
+            "internal_guidance": {
+                "enabled": True,
+                "scale": 1.2,
+                "interval": [0.1, 0.9],
+            },
+        }
+    )
+    assert explicit == {"enabled": True, "scale": 1.2, "interval": (0.1, 0.9)}
+    legacy = resolve_internal_guidance(
+        {"sampling": {"guidance_scale": 1.1, "guidance_interval": [0.2, 1.0]}}
+    )
+    assert legacy == {"enabled": True, "scale": 1.1, "interval": (0.2, 1.0)}
+
+
 def test_truncated_logit_normal_is_rescaled_to_unit_interval():
     generator = torch.Generator().manual_seed(7)
     values = sample_truncated_logit_normal(
@@ -123,3 +174,24 @@ def test_hybrid_optimizer_is_name_aware_and_covers_every_parameter():
         "muon",
         "adamw",
     ]
+
+
+def test_zero_initialized_projections_use_high_lr_groups():
+    model = _small_model()
+    config = {
+        "zero_init_lr_multiplier": 10.0,
+        "muon": {"lr": 1e-5, "momentum": 0.95},
+        "adamw": {"lr": 1e-6, "betas": [0.9, 0.95], "weight_decay": 0.01},
+    }
+    optimizer, names = build_muon_adamw(model, config)
+    groups = {group["name"]: group for group in optimizer.param_groups}
+    assert groups["muon_zero_init"]["lr"] == pytest.approx(1e-4)
+    assert groups["adamw_zero_init"]["lr"] == pytest.approx(1e-5)
+    high_lr_names = set(names["muon_zero_init"]) | set(names["adamw_zero_init"])
+    assert "output_projection.weight" in high_lr_names
+    assert "repa_head.1.weight" in high_lr_names
+    assert "blocks.0.cross_attn.output_projection.weight" in high_lr_names
+    all_names = {
+        name for name, parameter in model.named_parameters() if parameter.requires_grad
+    }
+    assert set().union(*(set(group) for group in names.values())) == all_names

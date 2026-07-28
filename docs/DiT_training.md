@@ -88,6 +88,8 @@ export HF_HUB_CACHE=/data/hf-cache/hub
 
 音频先经过冻结的 autoencoder encoder 得到 clean latent `x1`。DiT 接收带噪 latent，结构为：
 
+DiT 启动时使用 train split 统计每个 latent channel 的总体均值和标准差（聚合 batch 与 time 维）。当 `autoencoder.normalizer.stats_path` 不存在且 `compute_if_missing: true` 时，统计量会原子写入该路径；随后 train/validation/sampling 都使用同一组 `(x - mean) / std`，decoder 前执行精确逆变换。validation/test 数据不会参与统计。
+
 ```text
 latent
   -> residual 1x1 convolution
@@ -123,7 +125,13 @@ L_x = mean((v_pred - vt)^2)
 L_total = L_x + lambda_repa * L_repa
 ```
 
-这里没有实现一个额外、独立的 internal-guidance loss，也没有 CFG。原因是 RAE/RAEv2 语境中的 representation alignment 可在采样时提供 internal/auto guidance，但它和“再添加一项 guidance training loss”并非天然等价。为避免未经验证地重复约束，本版只保留一个明确的 REPA 对齐项；日志中的历史名称 `repa_internal_guidance` 指的就是该项。
+这里没有额外叠加一项独立的 guidance loss，也没有 CFG。early REPA head 本身输出较弱的 `base_x_pred`，与 full head 在同一个 forward 中训练。采样时显式启用：
+
+```text
+x_guided = base_x_pred + scale * (x_pred - base_x_pred)
+```
+
+`diffusion.internal_guidance.enabled: true` 时要求 `scale > 1`，并要求模型实际返回 early/base prediction；否则立即报错，不再静默退化为 unguided sampling。`interval` 控制启用 guidance 的 timestep 区间。
 
 ## 5. Timestep、优化器与学习率
 
@@ -131,10 +139,17 @@ L_total = L_x + lambda_repa * L_repa
 
 优化器采用 Muon + AdamW hybrid：
 
-- attention Q/K/V/out 和 feed-forward 矩阵参数使用 Muon，默认 learning rate `1e-5`、momentum `0.95`；
+- attention Q/K/V 和 feed-forward 矩阵参数使用 Muon，默认 learning rate `1e-5`、momentum `0.95`；
 - bias、归一化、卷积、embedding、输入/输出投影等其余参数使用 AdamW，默认 learning rate `1e-6`、betas `(0.9, 0.95)`、weight decay `0.01`。
+- 所有显式零初始化的 residual/output、self/cross-attention output、FF output、REPA/base head projection 使用独立的 `*_zero_init` 参数组；`optimizer.zero_init_lr_multiplier` 只放大这些参数的基础 learning rate。
 
-学习率沿用 autoencoder 的 warmup-cosine 方案。前 `warmup_steps` 线性升温，之后余弦衰减到各参数组初始 learning rate 的 `min_lr_ratio`。两个 optimizer 参数组共享同一个倍率，因此保留 10:1 的基础 learning-rate 比例。scheduler 每次 optimizer update 后推进一次，gradient accumulation 的 micro-batch 不单独推进。
+主实验采用 RAEv2 的 hold-linear-hold 三段式调度，但将绝对 LR 缩放到本项目已经验证过的 hybrid optimizer 范围：
+
+- epoch 0–25：保持基础 LR；Muon 为 `1e-5`，AdamW 为 `1e-6`；
+- epoch 25–50：线性下降 10 倍；
+- epoch 50–80：保持最终 LR；Muon 为 `1e-6`，AdamW 为 `1e-7`。
+
+`zero_init_lr_multiplier: 10` 始终生效，因此零初始化 Muon/AdamW 组分别从 `1e-4`/`1e-5` 下降到 `1e-5`/`1e-6`。所有参数组共享同一个 scheduler multiplier，组间比例不会随阶段变化。边界使用按实际 optimizer updates 计算的 epoch 长度，因此改变 gradient accumulation 后仍在第 25/50 epoch 切换。其他实验仍可继续使用 `warmup_cosine`。
 
 ## 6. 训练
 
@@ -165,7 +180,7 @@ TensorBoard：
 tensorboard --logdir runs/dit_mert330m_1k_5s/tensorboard_dit
 ```
 
-训练会汇报 `total`、`x_prediction`、`repa_internal_guidance` 以及 Muon/AdamW 的当前 learning rate，同时写入 TensorBoard 和 `dit_history.csv`。`training.loss_curve_every_steps` 控制每隔多少个 optimizer step 原子更新 `loss_curves.png`；未配置时默认使用 `log_every_steps`。
+训练会汇报 `total`、`x_prediction`、`repa_internal_guidance`，以及 Muon/AdamW 普通组和零初始化组的当前 learning rate，同时写入 TensorBoard 和 `dit_history.csv`。`training.loss_curve_every_steps` 控制每隔多少个 optimizer step 原子更新 `loss_curves.png`；未配置时默认使用 `log_every_steps`。
 
 每次 validation 使用固定随机种子选择同一组 5 条 prompt，并使用 DiT 的 padding collator 对不同长度的 text tokens 组 batch。生成结果经冻结 decoder 保存到 `listening/step_*`，其中包含 reference、generated WAV 和记录 prompt/seed/track id 的 metadata，便于跨 step 人工对比。checkpoint 会保存这 5 条索引和随机种子，resume 后保持一致。
 

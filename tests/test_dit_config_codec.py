@@ -10,6 +10,7 @@ torch = pytest.importorskip("torch")
 from torch import nn  # noqa: E402
 
 from ae_research.diffusion.codec import (  # noqa: E402
+    ChannelStatsAccumulator,
     FrozenAutoencoderCodec,
     LatentNormalizer,
 )
@@ -118,6 +119,27 @@ def test_load_dit_config_defaults_depth_and_normalizes_text_encoder(tmp_path):
     assert not Path(loaded["autoencoder"]["checkpoint_path"]).exists()
 
 
+def test_raev2_lr_schedule_config_validates_epoch_boundaries(tmp_path):
+    config = _valid_dit_config(tmp_path)
+    config["training"].update(
+        {
+            "epochs": 80,
+            "lr_scheduler": "raev2_hold_linear_hold",
+            "scheduler": {
+                "hold_epochs": 25,
+                "decay_end_epoch": 50,
+                "final_lr_ratio": 0.1,
+            },
+        }
+    )
+
+    validate_dit_config(config)
+
+    config["training"]["scheduler"]["decay_end_epoch"] = 81
+    with pytest.raises(ValueError, match="hold_epochs < decay_end_epoch"):
+        validate_dit_config(config)
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -146,6 +168,21 @@ def test_load_dit_config_defaults_depth_and_normalizes_text_encoder(tmp_path):
         (
             lambda c: c["dit"]["repa"].update(loss_weight=0.0),
             "positive when enabled",
+        ),
+        (
+            lambda c: c["diffusion"].update(
+                internal_guidance={"enabled": True, "scale": 1.0}
+            ),
+            "greater than 1",
+        ),
+        (
+            lambda c: (
+                c["diffusion"].update(
+                    internal_guidance={"enabled": True, "scale": 1.1}
+                ),
+                c["dit"]["repa"].update(enabled=False),
+            ),
+            "repa.enabled must be true",
         ),
     ],
 )
@@ -184,6 +221,41 @@ def test_latent_normalizer_round_trip_and_stats_file(tmp_path):
     assert not tuple(normalizer.parameters())
     with pytest.raises(ValueError, match="expected 3"):
         normalizer.normalize(torch.randn(2, 4, 7))
+
+
+def test_channel_stats_accumulator_matches_train_channel_statistics(tmp_path):
+    first = torch.tensor(
+        [
+            [[1.0, 3.0], [10.0, 14.0]],
+            [[5.0, 7.0], [18.0, 22.0]],
+        ]
+    )
+    second = torch.tensor([[[9.0, 11.0], [26.0, 30.0]]])
+    accumulator = ChannelStatsAccumulator(channels=2)
+    accumulator.update(first)
+    accumulator.update(second)
+    stats = accumulator.finalize(eps=1.0e-8)
+    combined = torch.cat((first, second), dim=0)
+
+    torch.testing.assert_close(stats["mean"], combined.mean(dim=(0, 2)))
+    torch.testing.assert_close(
+        stats["var"], combined.var(dim=(0, 2), unbiased=False)
+    )
+    assert stats["count"] == combined.shape[0] * combined.shape[2]
+
+    stats_path = tmp_path / "var_only_stats.pt"
+    torch.save({"mean": stats["mean"], "var": stats["var"]}, stats_path)
+    normalizer = LatentNormalizer.from_stats(stats_path, latent_dim=2)
+    normalized = normalizer.normalize(combined)
+    torch.testing.assert_close(
+        normalized.mean(dim=(0, 2)), torch.zeros(2), atol=1e-6, rtol=0
+    )
+    torch.testing.assert_close(
+        normalized.var(dim=(0, 2), unbiased=False),
+        torch.ones(2),
+        atol=1e-6,
+        rtol=0,
+    )
 
 
 class _DummySemanticEncoder(nn.Module):

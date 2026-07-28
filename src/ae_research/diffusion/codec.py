@@ -64,8 +64,8 @@ class LatentNormalizer(nn.Module):
         eps = float(eps)
         if not math.isfinite(eps) or eps <= 0.0:
             raise ValueError("eps must be positive and finite")
-        if torch.any(channel_std <= eps):
-            raise ValueError("std must be greater than eps in every channel")
+        if torch.any(channel_std < eps):
+            raise ValueError("std must be at least eps in every channel")
         self.eps = eps
         self.register_buffer("mean", channel_mean.reshape(1, -1, 1), persistent=True)
         self.register_buffer("std", channel_std.reshape(1, -1, 1), persistent=True)
@@ -101,8 +101,12 @@ class LatentNormalizer(nn.Module):
             raise ValueError(f"Latent stats must be a mapping: {stats_path}")
         mean = stats.get("mean", stats.get("channel_mean"))
         std = stats.get("std", stats.get("channel_std"))
+        if std is None:
+            variance = stats.get("var", stats.get("channel_var"))
+            if variance is not None:
+                std = torch.as_tensor(variance, dtype=torch.float32).clamp_min(0).sqrt()
         if mean is None or std is None:
-            raise ValueError("Latent stats must contain mean/std tensors")
+            raise ValueError("Latent stats must contain mean and std/var tensors")
         return cls(mean, std, latent_dim=latent_dim, eps=eps)
 
     def _validate(self, latent: torch.Tensor) -> None:
@@ -129,6 +133,52 @@ class LatentNormalizer(nn.Module):
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         return self.normalize(latent)
+
+
+class ChannelStatsAccumulator:
+    """Numerically stable population statistics over batch and time."""
+
+    def __init__(self, channels: int) -> None:
+        if channels <= 0:
+            raise ValueError("channels must be positive")
+        self.count = 0
+        self.mean = torch.zeros(channels, dtype=torch.float64)
+        self.m2 = torch.zeros(channels, dtype=torch.float64)
+
+    def update(self, latent: torch.Tensor) -> None:
+        if latent.ndim != 3 or latent.shape[1] != self.mean.numel():
+            raise ValueError("latent must have shape [batch, channels, frames]")
+        values = latent.detach().to(device="cpu", dtype=torch.float64)
+        batch_count = int(values.shape[0] * values.shape[2])
+        if batch_count == 0:
+            return
+        batch_mean = values.mean(dim=(0, 2))
+        centered = values - batch_mean.reshape(1, -1, 1)
+        batch_m2 = centered.square().sum(dim=(0, 2))
+        if self.count == 0:
+            self.count = batch_count
+            self.mean.copy_(batch_mean)
+            self.m2.copy_(batch_m2)
+            return
+        total = self.count + batch_count
+        delta = batch_mean - self.mean
+        self.m2.add_(batch_m2).add_(
+            delta.square(), alpha=self.count * batch_count / total
+        )
+        self.mean.add_(delta, alpha=batch_count / total)
+        self.count = total
+
+    def finalize(self, *, eps: float) -> dict[str, torch.Tensor | int]:
+        if self.count == 0:
+            raise RuntimeError("Cannot compute latent statistics from zero values")
+        variance = (self.m2 / self.count).clamp_min(0.0)
+        std = variance.sqrt().clamp_min(float(eps))
+        return {
+            "mean": self.mean.float(),
+            "std": std.float(),
+            "var": variance.float(),
+            "count": self.count,
+        }
 
 
 def _load_mapping(path: str | Path) -> dict[str, Any]:
@@ -431,6 +481,7 @@ class FrozenAutoencoderCodec(nn.Module):
         return self.autoencoder
 
     def _freeze(self) -> None:
+        super().train(False)
         self.autoencoder.requires_grad_(False)
         self.autoencoder.eval()
         self.normalizer.requires_grad_(False)
@@ -667,6 +718,7 @@ FrozenCodecAdapter = FrozenAutoencoderCodec
 
 
 __all__ = [
+    "ChannelStatsAccumulator",
     "CodecKind",
     "FrozenAutoencoderCodec",
     "FrozenCodecAdapter",

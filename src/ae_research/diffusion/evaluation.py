@@ -14,7 +14,7 @@ from tqdm import tqdm
 from .codec import load_frozen_codec
 from .data import create_dit_dataloader
 from .dit import AudioDiffusionTransformer
-from .flow_matching import euler_sample
+from .flow_matching import euler_sample, resolve_internal_guidance
 
 
 def run_gfad(
@@ -93,20 +93,16 @@ def _sampling_options(config: dict[str, Any]) -> dict[str, Any]:
     sampling = diffusion.get("sampling", {})
     if not isinstance(sampling, dict):
         sampling = {}
-    guidance = diffusion.get("internal_guidance", {})
-    if not isinstance(guidance, dict):
-        guidance = {}
-    interval = guidance.get("interval", sampling.get("guidance_interval", [0.0, 1.0]))
+    guidance = resolve_internal_guidance(
+        diffusion,
+        scale_override=evaluation.get("internal_guidance_scale"),
+    )
     return {
         "steps": int(evaluation.get("sampling_steps", sampling.get("steps", 50))),
         "t_eps": float(diffusion.get("t_eps", 1e-5)),
-        "guidance_scale": float(
-            evaluation.get(
-                "internal_guidance_scale",
-                guidance.get("scale", sampling.get("guidance_scale", 1.0)),
-            )
-        ),
-        "guidance_interval": (float(interval[0]), float(interval[1])),
+        "internal_guidance_enabled": bool(guidance["enabled"]),
+        "guidance_scale": float(guidance["scale"]),
+        "guidance_interval": guidance["interval"],
     }
 
 

@@ -25,17 +25,25 @@ from torch.utils.data import default_collate
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
+from .codec import ChannelStatsAccumulator, LatentNormalizer
 from .dit import AudioDiffusionTransformer
 from .flow_matching import (
     XPredictionObjective,
     euler_sample,
     flow_interpolate,
+    resolve_internal_guidance,
     sample_truncated_logit_normal,
 )
 from .optim import build_muon_adamw
 
 
 LOSS_NAMES = ("total", "x_prediction", "repa_internal_guidance")
+LR_NAMES = (
+    "muon_lr",
+    "adamw_lr",
+    "muon_zero_init_lr",
+    "adamw_zero_init_lr",
+)
 
 
 def _reset_fresh_output_dir(output_dir: Path) -> None:
@@ -91,6 +99,34 @@ def _warmup_cosine_multiplier(
     progress = min(max(progress, 0.0), 1.0)
     cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
     return min_ratio + (1.0 - min_ratio) * cosine
+
+
+def _raev2_hold_linear_hold_multiplier(
+    step: int,
+    *,
+    updates_per_epoch: int,
+    hold_epochs: int,
+    decay_end_epoch: int,
+    final_ratio: float,
+) -> float:
+    """RAEv2 schedule: hold, linearly decay, then hold the final LR."""
+    if updates_per_epoch <= 0:
+        raise ValueError("updates_per_epoch must be positive")
+    if hold_epochs < 0:
+        raise ValueError("hold_epochs must be non-negative")
+    if decay_end_epoch <= hold_epochs:
+        raise ValueError("decay_end_epoch must be greater than hold_epochs")
+    if not 0.0 <= final_ratio <= 1.0:
+        raise ValueError("final_ratio must be in [0, 1]")
+
+    hold_steps = hold_epochs * updates_per_epoch
+    decay_end_steps = decay_end_epoch * updates_per_epoch
+    if step < hold_steps:
+        return 1.0
+    if step >= decay_end_steps:
+        return final_ratio
+    progress = (step - hold_steps) / (decay_end_steps - hold_steps)
+    return 1.0 - (1.0 - final_ratio) * progress
 
 
 def _prompt_from_value(value: Any) -> str:
@@ -475,7 +511,8 @@ def _optimizer_learning_rates(
     result: dict[str, float] = {}
     for index, group in enumerate(optimizer.param_groups):
         algorithm = str(group.get("algorithm", f"group_{index}")).casefold()
-        result[f"{algorithm}_lr"] = float(group["lr"])
+        group_name = str(group.get("name", algorithm)).casefold()
+        result[f"{group_name}_lr"] = float(group["lr"])
     if "muon_lr" not in result and optimizer.param_groups:
         result["muon_lr"] = float(optimizer.param_groups[0]["lr"])
     if "adamw_lr" not in result and len(optimizer.param_groups) > 1:
@@ -533,7 +570,6 @@ class DiTTrainer:
         self.sample_dir = self.output_dir / "listening"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.sample_dir.mkdir(parents=True, exist_ok=True)
-        self._write_resolved_config()
 
         self.codec = codec if codec is not None else self._build_codec()
         if isinstance(self.codec, nn.Module):
@@ -564,6 +600,8 @@ class DiTTrainer:
             raise RuntimeError("Diffusion training loader produced no batches")
         if len(self.val_loader) == 0:
             raise RuntimeError("Diffusion validation loader produced no batches")
+        self._ensure_latent_normalizer()
+        self._write_resolved_config()
 
         diffusion_config = self.config["diffusion"]
         timestep_config = diffusion_config.get("timestep_sampler", {})
@@ -598,20 +636,48 @@ class DiTTrainer:
         scheduler_config = self.train_config.get(
             "scheduler", self.config.get("scheduler", {})
         )
-        warmup_steps = int(
-            scheduler_config.get(
-                "warmup_steps", self.train_config.get("warmup_steps", 0)
+        if not isinstance(scheduler_config, Mapping):
+            raise ValueError("training.scheduler must be a mapping")
+        scheduler_type = str(
+            self.train_config.get("lr_scheduler", "warmup_cosine")
+        ).casefold().replace("-", "_")
+        if scheduler_type == "warmup_cosine":
+            warmup_steps = int(
+                scheduler_config.get(
+                    "warmup_steps", self.train_config.get("warmup_steps", 0)
+                )
             )
-        )
-        min_ratio = self._scheduler_min_ratio(scheduler_config)
+            min_ratio = self._scheduler_min_ratio(scheduler_config)
+
+            def lr_lambda(step: int) -> float:
+                return _warmup_cosine_multiplier(
+                    step,
+                    total_steps=self.total_optimizer_steps,
+                    warmup_steps=warmup_steps,
+                    min_ratio=min_ratio,
+                )
+
+        elif scheduler_type == "raev2_hold_linear_hold":
+            hold_epochs = int(scheduler_config.get("hold_epochs", 25))
+            decay_end_epoch = int(
+                scheduler_config.get("decay_end_epoch", 50)
+            )
+            final_ratio = float(scheduler_config.get("final_lr_ratio", 0.1))
+
+            def lr_lambda(step: int) -> float:
+                return _raev2_hold_linear_hold_multiplier(
+                    step,
+                    updates_per_epoch=updates_per_epoch,
+                    hold_epochs=hold_epochs,
+                    decay_end_epoch=decay_end_epoch,
+                    final_ratio=final_ratio,
+                )
+
+        else:  # pragma: no cover - config validation rejects this first
+            raise ValueError(f"Unsupported LR scheduler: {scheduler_type}")
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer,
-            lr_lambda=lambda step: _warmup_cosine_multiplier(
-                step,
-                total_steps=self.total_optimizer_steps,
-                warmup_steps=warmup_steps,
-                min_ratio=min_ratio,
-            ),
+            lr_lambda=lr_lambda,
         )
 
         precision = str(
@@ -682,11 +748,134 @@ class DiTTrainer:
     def _build_codec(self) -> Any:
         module = importlib.import_module("ae_research.diffusion.codec")
         factory = getattr(module, "load_frozen_codec")
+        autoencoder_config = copy.deepcopy(self.autoencoder_config)
+        normalizer_config = autoencoder_config.get("normalizer", {})
+        if isinstance(normalizer_config, Mapping):
+            stats_path = normalizer_config.get("stats_path")
+            compute_if_missing = bool(
+                normalizer_config.get("compute_if_missing", False)
+            )
+            if (
+                normalizer_config.get("enabled", False)
+                and compute_if_missing
+                and stats_path
+                and not Path(stats_path).is_file()
+            ):
+                normalizer_config = dict(normalizer_config)
+                normalizer_config["enabled"] = False
+                autoencoder_config["normalizer"] = normalizer_config
         return factory(
-            self.autoencoder_config,
+            autoencoder_config,
             expected_sample_rate=int(self.data_config["sample_rate"]),
             expected_channels=int(self.data_config["channels"]),
             map_location=self.device,
+        )
+
+    @torch.no_grad()
+    def _ensure_latent_normalizer(self) -> None:
+        normalizer_config = self.autoencoder_config.get("normalizer", {})
+        if not isinstance(normalizer_config, Mapping):
+            return
+        if not bool(normalizer_config.get("enabled", False)):
+            return
+        stats_value = normalizer_config.get("stats_path")
+        if not stats_value:
+            raise ValueError(
+                "autoencoder.normalizer.stats_path must be set when normalization "
+                "is enabled"
+            )
+        stats_path = Path(stats_value)
+        eps = float(normalizer_config.get("eps", 1.0e-8))
+        if not stats_path.is_file():
+            if not bool(normalizer_config.get("compute_if_missing", False)):
+                raise FileNotFoundError(f"Latent stats file not found: {stats_path}")
+            self._compute_train_latent_statistics(
+                stats_path,
+                eps=eps,
+                max_batches=normalizer_config.get("max_batches"),
+            )
+        normalizer = LatentNormalizer.from_stats(
+            stats_path,
+            latent_dim=self.latent_dim,
+            map_location=self.device,
+            eps=eps,
+        ).to(self.device)
+        normalizer.requires_grad_(False)
+        normalizer.eval()
+        self.codec.normalizer = normalizer
+        self._freeze_codec()
+
+    @torch.no_grad()
+    def _compute_train_latent_statistics(
+        self,
+        stats_path: Path,
+        *,
+        eps: float,
+        max_batches: int | None,
+    ) -> None:
+        accumulator = ChannelStatsAccumulator(self.latent_dim)
+        limit = None if max_batches is None else int(max_batches)
+        progress = tqdm(
+            self.train_loader,
+            desc="train latent statistics",
+            total=(
+                min(len(self.train_loader), limit)
+                if limit is not None
+                else len(self.train_loader)
+            ),
+        )
+        for batch_index, batch in enumerate(progress):
+            if limit is not None and batch_index >= limit:
+                break
+            if not isinstance(batch, Mapping) or "audio" not in batch:
+                raise TypeError("Training batches must contain an audio tensor")
+            audio = batch["audio"].to(
+                self.device, dtype=torch.float32, non_blocking=True
+            )
+            encode_raw = getattr(self.codec, "encode_raw", None)
+            if callable(encode_raw):
+                latent = _extract_encoded_latent(encode_raw(audio))
+            else:
+                latent = _extract_encoded_latent(self.codec.encode(audio))
+                latent = _normalizer_apply(
+                    getattr(self.codec, "normalizer", None),
+                    latent,
+                    inverse=True,
+                )
+            if latent.ndim != 3 or latent.shape[1] != self.latent_dim:
+                raise ValueError(
+                    "Raw codec latent must have shape [batch, latent_dim, frames]"
+                )
+            if not torch.isfinite(latent).all():
+                raise FloatingPointError(
+                    "codec produced non-finite raw latents while computing statistics"
+                )
+            accumulator.update(latent)
+        payload = accumulator.finalize(eps=eps)
+        payload.update(
+            {
+                "format_version": 1,
+                "aggregation": "channel_wise_population",
+                "split": "train",
+                "latent_dim": self.latent_dim,
+            }
+        )
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = stats_path.with_name(
+            f".{stats_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            torch.save(payload, temporary)
+            LatentNormalizer.from_stats(
+                temporary, latent_dim=self.latent_dim, eps=eps
+            )
+            os.replace(temporary, stats_path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        print(
+            f"Saved train channel-wise latent statistics to {stats_path} "
+            f"(count={payload['count']})"
         )
 
     def _build_loader(self, *, split: str, batch_size: int, shuffle: bool) -> Any:
@@ -860,7 +1049,7 @@ class DiTTrainer:
         metrics: Mapping[str, float],
     ) -> None:
         values = {**metrics, **_optimizer_learning_rates(self.optimizer)}
-        for name in (*LOSS_NAMES, "muon_lr", "adamw_lr"):
+        for name in (*LOSS_NAMES, *LR_NAMES):
             if name in values:
                 self.writer.add_scalar(f"{split}/{name}", values[name], self.global_step)
         self.history.append(
@@ -873,7 +1062,7 @@ class DiTTrainer:
             f"[{split}] epoch={epoch} step={self.global_step} "
             + " ".join(
                 f"{name}={float(values[name]):.6g}"
-                for name in (*LOSS_NAMES, "muon_lr", "adamw_lr")
+                for name in (*LOSS_NAMES, *LR_NAMES)
                 if name in values
             )
         )
@@ -1001,9 +1190,7 @@ class DiTTrainer:
         reference_latent = self._encode(audio)
         embedding, mask, duration = self._conditions(batch)
         sampling = self.config["diffusion"].get("sampling", {})
-        interval = sampling.get("guidance_interval", (0.0, 1.0))
-        if isinstance(interval, Mapping):
-            interval = (interval.get("min", 0.0), interval.get("max", 1.0))
+        guidance = resolve_internal_guidance(self.config["diffusion"])
         generator = _make_generator(self.device, self.listening_seeds["noise"])
         with self._autocast():
             generated_latent = euler_sample(
@@ -1014,8 +1201,9 @@ class DiTTrainer:
                 text_mask=mask,
                 steps=int(sampling.get("steps", 50)),
                 t_eps=float(sampling.get("t_eps", self.t_eps)),
-                guidance_scale=float(sampling.get("guidance_scale", 1.0)),
-                guidance_interval=(float(interval[0]), float(interval[1])),
+                internal_guidance_enabled=bool(guidance["enabled"]),
+                guidance_scale=float(guidance["scale"]),
+                guidance_interval=guidance["interval"],
                 generator=generator,
             )
         target_samples = audio.shape[-1]

@@ -150,6 +150,40 @@ def internal_guidance_prediction(
     return base_prediction + float(scale) * (full_prediction - base_prediction)
 
 
+def resolve_internal_guidance(
+    diffusion_config: Mapping[str, Any],
+    *,
+    scale_override: float | None = None,
+) -> dict[str, Any]:
+    """Resolve one explicit IG configuration with legacy sampling fallback."""
+    sampling = diffusion_config.get("sampling", {})
+    if not isinstance(sampling, Mapping):
+        sampling = {}
+    guidance = diffusion_config.get("internal_guidance", {})
+    if not isinstance(guidance, Mapping):
+        guidance = {}
+
+    scale = float(
+        scale_override
+        if scale_override is not None
+        else guidance.get("scale", sampling.get("guidance_scale", 1.0))
+    )
+    enabled = bool(guidance.get("enabled", scale > 1.0))
+    interval = guidance.get(
+        "interval", guidance.get("guidance_interval", sampling.get("guidance_interval", (0.0, 1.0)))
+    )
+    if isinstance(interval, Mapping):
+        interval = (interval.get("min", 0.0), interval.get("max", 1.0))
+    if not isinstance(interval, Sequence) or len(interval) != 2:
+        raise ValueError("internal guidance interval must contain two values")
+    resolved_interval = (float(interval[0]), float(interval[1]))
+    return {
+        "enabled": enabled,
+        "scale": scale,
+        "interval": resolved_interval,
+    }
+
+
 @torch.no_grad()
 def euler_sample(
     model: nn.Module,
@@ -160,6 +194,7 @@ def euler_sample(
     text_mask: torch.Tensor,
     steps: int,
     t_eps: float,
+    internal_guidance_enabled: bool = False,
     guidance_scale: float = 1.0,
     guidance_interval: tuple[float, float] = (0.0, 1.0),
     generator: torch.Generator | None = None,
@@ -173,6 +208,10 @@ def euler_sample(
         raise ValueError("steps must be positive")
     if t_eps <= 0:
         raise ValueError("t_eps must be positive")
+    if internal_guidance_enabled and guidance_scale <= 1.0:
+        raise ValueError(
+            "Enabled internal guidance requires guidance_scale greater than 1"
+        )
     interval_start, interval_end = guidance_interval
     if not 0 <= interval_start <= interval_end <= 1:
         raise ValueError("guidance_interval must lie within [0, 1]")
@@ -204,10 +243,15 @@ def euler_sample(
         base_prediction = outputs.get("base_x_pred")
         if base_prediction is None:
             base_prediction = outputs.get("repa_pred")
+        if internal_guidance_enabled and base_prediction is None:
+            raise RuntimeError(
+                "Internal guidance is enabled, but the model did not return "
+                "base_x_pred/repa_pred"
+            )
         use_guidance = interval_start <= float(current) <= interval_end
         prediction = internal_guidance_prediction(
             outputs["x_pred"],
-            base_prediction if use_guidance else None,
+            base_prediction if internal_guidance_enabled and use_guidance else None,
             scale=guidance_scale,
         )
         velocity = x_prediction_to_velocity(
@@ -222,6 +266,7 @@ __all__ = [
     "euler_sample",
     "flow_interpolate",
     "internal_guidance_prediction",
+    "resolve_internal_guidance",
     "sample_truncated_logit_normal",
     "x_prediction_to_velocity",
 ]

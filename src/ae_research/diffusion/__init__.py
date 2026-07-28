@@ -5,6 +5,7 @@ from typing import Protocol
 import torch
 
 from .codec import (
+    ChannelStatsAccumulator,
     FrozenAutoencoderCodec,
     FrozenCodecAdapter,
     LatentNormalizer,
@@ -31,6 +32,7 @@ class LatentGenerator(Protocol):
 __all__ = [
     "DEFAULT_DIT_DEPTH",
     "DEFAULT_TEXT_ENCODER",
+    "ChannelStatsAccumulator",
     "FrozenAutoencoderCodec",
     "FrozenCodecAdapter",
     "LatentCodec",

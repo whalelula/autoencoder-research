@@ -9,6 +9,7 @@ torch = pytest.importorskip("torch")
 from ae_research.diffusion.trainer import (  # noqa: E402
     DiTTrainer,
     DiffusionHistoryWriter,
+    _raev2_hold_linear_hold_multiplier,
     _reset_fresh_output_dir,
     _warmup_cosine_multiplier,
     atomic_save_checkpoint,
@@ -16,6 +17,7 @@ from ae_research.diffusion.trainer import (  # noqa: E402
     plot_diffusion_history,
     select_fixed_listening_indices,
 )
+from ae_research.diffusion.codec import LatentNormalizer  # noqa: E402
 
 
 class _PromptDataset:
@@ -35,6 +37,55 @@ class _PromptDataset:
 
     def __getitem__(self, index: int):
         return self.records[index]
+
+
+class _RawCodec(torch.nn.Module):
+    latent_dim = 2
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.normalizer = LatentNormalizer.identity(self.latent_dim)
+
+    def encode_raw(self, audio):
+        return audio
+
+    def encode(self, audio):
+        return self.normalizer.normalize(self.encode_raw(audio))
+
+
+def test_trainer_computes_and_installs_train_channel_normalizer(tmp_path):
+    trainer = DiTTrainer.__new__(DiTTrainer)
+    trainer.device = torch.device("cpu")
+    trainer.latent_dim = 2
+    trainer.codec = _RawCodec()
+    trainer.train_loader = [
+        {"audio": torch.tensor([[[1.0, 3.0], [10.0, 14.0]]])},
+        {"audio": torch.tensor([[[5.0, 7.0], [18.0, 22.0]]])},
+    ]
+    stats_path = tmp_path / "train_latent_stats.pt"
+    trainer.autoencoder_config = {
+        "normalizer": {
+            "enabled": True,
+            "stats_path": str(stats_path),
+            "compute_if_missing": True,
+            "eps": 1.0e-8,
+        }
+    }
+
+    trainer._ensure_latent_normalizer()
+
+    assert stats_path.is_file()
+    raw = torch.cat([batch["audio"] for batch in trainer.train_loader], dim=0)
+    normalized = trainer.codec.encode(raw)
+    torch.testing.assert_close(
+        normalized.mean(dim=(0, 2)), torch.zeros(2), atol=1e-6, rtol=0
+    )
+    torch.testing.assert_close(
+        normalized.var(dim=(0, 2), unbiased=False),
+        torch.ones(2),
+        atol=1e-6,
+        rtol=0,
+    )
 
 
 def test_reset_fresh_output_dir_removes_previous_dit_artifacts(tmp_path):
@@ -72,6 +123,33 @@ def test_shared_warmup_cosine_multiplier_preserves_lr_ratio():
         assert math.isclose(
             (muon_base * multiplier) / (adamw_base * multiplier), 10.0
         )
+
+
+def test_raev2_lr_multiplier_holds_decays_and_holds():
+    updates_per_epoch = 4
+
+    def multiplier(epoch: float) -> float:
+        return _raev2_hold_linear_hold_multiplier(
+            int(epoch * updates_per_epoch),
+            updates_per_epoch=updates_per_epoch,
+            hold_epochs=25,
+            decay_end_epoch=50,
+            final_ratio=0.1,
+        )
+
+    assert multiplier(0) == 1.0
+    assert multiplier(24) == 1.0
+    assert multiplier(25) == 1.0
+    assert multiplier(37.5) == pytest.approx(0.55)
+    assert multiplier(50) == pytest.approx(0.1)
+    assert multiplier(79) == pytest.approx(0.1)
+
+    # One shared multiplier preserves both the hybrid optimizer ratio and the
+    # separate zero-init multiplier throughout all three phases.
+    for epoch in (0, 25, 37.5, 50, 79):
+        value = multiplier(epoch)
+        assert (1e-5 * value) / (1e-6 * value) == pytest.approx(10.0)
+        assert (1e-4 * value) / (1e-5 * value) == pytest.approx(10.0)
 
 
 def test_fixed_listening_indices_are_deterministic_and_text_unique():

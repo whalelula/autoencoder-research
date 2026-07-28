@@ -16,8 +16,9 @@ autoencoder:
   config_path: configs/dam_mert330m_1k_5s.yaml
   checkpoint_path: runs/dam_mert330m_1k_5s_v2/checkpoints/best.pt
   normalizer:
-    enabled: false
-    stats_path: null
+    enabled: true
+    stats_path: data/MTG-Jamendo-1000-24k-mono-5s/latent_stats/dam_mert330m_1k_5s_train.pt
+    compute_if_missing: true
     eps: 1.0e-8
 
 dit:
@@ -30,7 +31,7 @@ dit:
   repa:
     enabled: true
     layer: 2
-    loss_weight: 1.0
+    loss_weight: 0.1 # 弱约束
 
 conditioning:
   cross_attention: true
@@ -45,6 +46,10 @@ conditioning:
 diffusion:
   prediction_type: x_prediction
   t_eps: 0.05
+  internal_guidance:
+    enabled: true
+    scale: 1.1 # weak guidance
+    interval: [0.1, 1.0]
   timestep_sampler:
     type: truncated_logit_normal
     mean: 0.0
@@ -54,12 +59,11 @@ diffusion:
     flip: false
   sampling:
     steps: 50
-    guidance_scale: 1.0
-    guidance_interval: [0.1, 1.0]
 
 optimizer:
   type: muon_adamw
   parameter_assignment: qkv_and_ff
+  zero_init_lr_multiplier: 10.0
   muon:
     lr: 1.0e-5
     momentum: 0.95
@@ -73,15 +77,17 @@ optimizer:
 
 training:
   output_dir: runs/dit_mert330m_1k_5s
-  epochs: 100
+  epochs: 80
   batch_size: 32
   grad_accumulation_steps: 1
   mixed_precision: bf16
   amp: true
   grad_clip_norm: 1.0
-  lr_scheduler: warmup_cosine
-  warmup_steps: 150
-  min_lr_ratio: 0.05
+  lr_scheduler: raev2_hold_linear_hold
+  scheduler:
+    hold_epochs: 25
+    decay_end_epoch: 50
+    final_lr_ratio: 0.1
   log_every_steps: 20
   loss_curve_every_steps: 200
   validate_every_steps: 856

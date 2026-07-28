@@ -138,6 +138,16 @@ def _apply_defaults(config: dict[str, Any]) -> None:
                 "guidance_interval": [0.1, 1.0],
             },
         )
+        if "internal_guidance" not in diffusion:
+            sampling = diffusion.get("sampling", {})
+            if not isinstance(sampling, Mapping):
+                sampling = {}
+            legacy_scale = float(sampling.get("guidance_scale", 1.0))
+            diffusion["internal_guidance"] = {
+                "enabled": legacy_scale > 1.0,
+                "scale": legacy_scale,
+                "interval": sampling.get("guidance_interval", [0.0, 1.0]),
+            }
 
     optimizer = config.get("optimizer")
     if isinstance(optimizer, dict):
@@ -151,6 +161,7 @@ def _apply_defaults(config: dict[str, Any]) -> None:
             adamw.setdefault("lr", 1.0e-6)
             adamw.setdefault("betas", [0.9, 0.95])
             adamw.setdefault("weight_decay", 0.01)
+        optimizer.setdefault("zero_init_lr_multiplier", 1.0)
 
     training = config.get("training")
     if isinstance(training, dict):
@@ -249,6 +260,16 @@ def _validate_autoencoder(
             )
         if "eps" in normalizer:
             _positive_float(normalizer["eps"], "autoencoder.normalizer.eps")
+        if "compute_if_missing" in normalizer:
+            _boolean(
+                normalizer["compute_if_missing"],
+                "autoencoder.normalizer.compute_if_missing",
+            )
+        if "max_batches" in normalizer and normalizer["max_batches"] is not None:
+            _positive_int(
+                normalizer["max_batches"],
+                "autoencoder.normalizer.max_batches",
+            )
     if "sample_rate" in autoencoder and int(autoencoder["sample_rate"]) != int(
         data["sample_rate"]
     ):
@@ -298,7 +319,7 @@ def _validate_dit(dit: Mapping[str, Any]) -> int:
             )
             if enabled and weight <= 0:
                 raise ValueError(
-                    "dit.repa.loss_weight must be positive when REPA is enabled"
+                    "dit.repa.loss_weight must be positive when enabled"
                 )
     return depth
 
@@ -422,6 +443,33 @@ def _validate_diffusion(diffusion: Mapping[str, Any], depth: int) -> None:
         raise ValueError(
             "diffusion.sampling.guidance_interval must lie within [0, 1]"
         )
+    guidance = _mapping(
+        diffusion.get("internal_guidance", {}),
+        "diffusion.internal_guidance",
+    )
+    enabled = guidance.get("enabled", False)
+    _boolean(enabled, "diffusion.internal_guidance.enabled")
+    scale = _positive_float(
+        guidance.get("scale", 1.0),
+        "diffusion.internal_guidance.scale",
+    )
+    if enabled and scale <= 1.0:
+        raise ValueError(
+            "diffusion.internal_guidance.scale must be greater than 1 when enabled"
+        )
+    guidance_interval = guidance.get(
+        "interval", guidance.get("guidance_interval", [0.0, 1.0])
+    )
+    if (
+        not isinstance(guidance_interval, (list, tuple))
+        or len(guidance_interval) != 2
+    ):
+        raise ValueError("diffusion.internal_guidance.interval must have two values")
+    guidance_start, guidance_end = map(float, guidance_interval)
+    if not 0 <= guidance_start <= guidance_end <= 1:
+        raise ValueError(
+            "diffusion.internal_guidance.interval must lie within [0, 1]"
+        )
 
 
 def _validate_optimizer(optimizer: Mapping[str, Any]) -> None:
@@ -459,6 +507,15 @@ def _validate_optimizer(optimizer: Mapping[str, Any]) -> None:
         _positive_int(muon["ns_steps"], "optimizer.muon.ns_steps")
     if "nesterov" in muon:
         _boolean(muon["nesterov"], "optimizer.muon.nesterov")
+    if "zero_init_lr_multiplier" in optimizer:
+        multiplier = _positive_float(
+            optimizer["zero_init_lr_multiplier"],
+            "optimizer.zero_init_lr_multiplier",
+        )
+        if multiplier < 1.0:
+            raise ValueError(
+                "optimizer.zero_init_lr_multiplier must be at least 1"
+            )
     assignment = optimizer.get("muon_parameters", optimizer.get("parameter_assignment"))
     if assignment is not None and str(assignment).lower() not in {
         "qkv_ff",
@@ -472,14 +529,50 @@ def _validate_training(training: Mapping[str, Any]) -> None:
     scheduler_value = training.get("lr_scheduler", training.get("scheduler"))
     if isinstance(scheduler_value, Mapping):
         scheduler_type = scheduler_value.get("type")
+        scheduler = scheduler_value
     else:
         scheduler_type = scheduler_value
-    if str(scheduler_type).lower().replace("-", "_") != "warmup_cosine":
-        raise ValueError("training.lr_scheduler must be warmup_cosine")
+        nested_scheduler = training.get("scheduler", {})
+        scheduler = (
+            _mapping(nested_scheduler, "training.scheduler")
+            if nested_scheduler is not None
+            else {}
+        )
+    scheduler_type = str(scheduler_type).lower().replace("-", "_")
+    if scheduler_type not in {"warmup_cosine", "raev2_hold_linear_hold"}:
+        raise ValueError(
+            "training.lr_scheduler must be warmup_cosine or "
+            "raev2_hold_linear_hold"
+        )
     _path(training.get("output_dir"), "training.output_dir")
     for name in ("epochs", "batch_size", "grad_accumulation_steps", "max_steps"):
         if name in training:
             _positive_int(training[name], f"training.{name}")
+    epochs = _positive_int(training.get("epochs"), "training.epochs")
+    if scheduler_type == "raev2_hold_linear_hold":
+        hold_epochs = _positive_int(
+            scheduler.get("hold_epochs", 25),
+            "training.scheduler.hold_epochs",
+            allow_zero=True,
+        )
+        decay_end_epoch = _positive_int(
+            scheduler.get("decay_end_epoch", 50),
+            "training.scheduler.decay_end_epoch",
+        )
+        if not hold_epochs < decay_end_epoch <= epochs:
+            raise ValueError(
+                "RAEv2 LR phases must satisfy hold_epochs < "
+                "decay_end_epoch <= training.epochs"
+            )
+        final_ratio = _positive_float(
+            scheduler.get("final_lr_ratio", 0.1),
+            "training.scheduler.final_lr_ratio",
+            allow_zero=True,
+        )
+        if final_ratio > 1.0:
+            raise ValueError(
+                "training.scheduler.final_lr_ratio must be at most 1"
+            )
     if "warmup_steps" in training:
         _positive_int(training["warmup_steps"], "training.warmup_steps", allow_zero=True)
     for name in (
@@ -556,6 +649,16 @@ def validate_dit_config(config: Mapping[str, Any]) -> None:
     _validate_text_conditioning(conditioning)
     _validate_diffusion(diffusion, depth)
     _validate_optimizer(optimizer)
+    guidance = diffusion.get("internal_guidance", {})
+    repa = dit.get("repa", {})
+    if (
+        isinstance(guidance, Mapping)
+        and guidance.get("enabled", False)
+        and (not isinstance(repa, Mapping) or not repa.get("enabled", False))
+    ):
+        raise ValueError(
+            "dit.repa.enabled must be true when internal guidance is enabled"
+        )
     _validate_training(training)
     _validate_evaluation(evaluation)
     _validate_no_cfg(
