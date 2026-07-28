@@ -83,7 +83,7 @@ training:
   warmup_steps: 150
   min_lr_ratio: 0.05
   log_every_steps: 20
-  loss_curve_every_steps: 20
+  loss_curve_every_steps: 200
   validate_every_steps: 856
   checkpoint_every_steps: 25680 # 856*30，每30个epoch更新一次
   max_validation_batches: 100
